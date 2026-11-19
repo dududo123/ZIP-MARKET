@@ -1,58 +1,31 @@
-# ZIP! MARKET v8.1 — Netlify Function 런타임 수정본
+# ZIP! MARKET v8.2.0 — schema/API 일치 복구본
 
-> v8 업로드 후 `/api/health`에서 `module is not defined in ES module scope`가 발생한 경우를 수정했습니다.
-> 원인은 Netlify가 만든 CommonJS Function 번들(`module.exports`)이 함께 포함된 `package.json`의 `type: module` 때문에 ES module로 다시 해석된 것이었습니다.
-> v8.1은 프로젝트 루트의 module 강제 설정과 Function 번들 안의 `package.json` 포함을 제거해 이 충돌을 막습니다.
+이 배포본은 v8.1의 `SCHEMA_MISSING` 오류를 수정합니다. Netlify Function이 호출하는 RPC 이름·매개변수와 `supabase/schema.sql`에 생성되는 함수가 정확히 일치합니다.
 
-# ZIP! MARKET v8 — 사용자·관리자 로그인 복구 통합본
+## 오류 원인
 
-## 실제 로그인 장애 원인
+v8.1 Function은 아래 RPC를 호출하지만 운영 Supabase에는 함수가 없거나 이전 이름만 남아 있었습니다.
 
-최신 프로젝트가 기존 Supabase 데이터베이스와 **서로 다른 열 이름**을 사용하고 있었습니다.
+- `zip_market_initialize_admin(p_initial_password)`
+- `zip_market_auth_admin(p_initial_password, p_password)`
 
-| 기존 운영 DB(V5 계열) | 오류가 난 최신 코드 |
-|---|---|
-| `participants.employee_no` | `participants.employee_id` |
-| `participants.credit_balance` | `participants.credits` |
-| `transactions.amount` 중심 | 존재하지 않는 `balance_after` 필수 조회 |
+PostgREST가 함수를 찾지 못해 `/api/health`와 관리자 로그인이 모두 `PGRST202 / schema cache` 오류로 중단된 것입니다.
 
-또한 최신 `schema.sql`은 `create table if not exists`만 사용했기 때문에, 이미 존재하는 테이블의 열 이름을 바꾸지 못합니다. 그 결과 사용자 로그인과 관리자 로그인 모두 로그인 직후 참가자/목록 조회 단계에서 실패할 수 있었습니다.
+## 가장 안전한 적용 순서
 
-v8은 다음 방식으로 복구합니다.
-
-- 기존 운영 DB의 `employee_no`, `credit_balance`를 그대로 사용
-- 기존 참가자·크레딧·게임·내역 데이터 삭제 없음
-- 기존 V5 열 이름을 사용하는 인증 함수를 `schema.sql`로 안전하게 추가
-- `@supabase/supabase-js`를 사용하지 않고 Supabase REST Data API를 직접 호출
-- 기존 bcrypt 비밀번호는 Supabase `pgcrypto`에서 검증
-- 관리자 DB 비밀번호와 `INITIAL_ADMIN_PASSWORD`가 다르면 현재 환경변수 비밀번호로 로그인할 때 자동 동기화
-- `/api` 리다이렉트가 누락돼도 Function 직접 주소로 한 번 더 요청
-- JSON이 아닌 서버 오류를 더 이상 단순한 “요청을 처리하지 못했습니다”로 숨기지 않고 원인을 표시
-
-## V5 이전 폰트 복원
-
-V5 이전의 실제 v4 원본에서 사용한 구성을 그대로 복원했습니다.
-
-- 본문·입력창: **Pretendard**
-- 제목·버튼·브랜드 요소: **Jua(주아)**
-- 폰트 로드 실패 시 Apple SD Gothic Neo, Noto Sans KR, 맑은 고딕 순으로 대체
-
-## 배포 순서
-
-1. 압축을 풀고 GitHub 저장소 내용을 이 프로젝트 파일로 **전체 교체**합니다.
-2. **v8 적용 때 이미 `supabase/schema.sql`을 실행했다면 SQL은 다시 실행하지 않아도 됩니다.** 아직 실행하지 않았다면 Supabase → SQL Editor에서 `supabase/schema.sql` 전체를 한 번 실행합니다.
-   - 기존 데이터는 삭제하지 않습니다.
-   - 기존 열 이름을 바꾸지 않고 로그인 인증 함수, 새 게임 보상, 원자적 크레딧 처리 함수만 안전하게 보강합니다.
-   - 이 SQL을 실행하지 않으면 로그인 화면에 `SCHEMA_MISSING` 안내가 표시됩니다.
-3. Netlify Environment variables에 아래 4개가 있는지 확인합니다.
+1. 이 폴더의 **전체 파일**을 GitHub 프로젝트에 덮어씁니다.
+2. Supabase → SQL Editor → New query에서 `supabase/schema.sql` 전체를 실행합니다.
+   - 기존 참가자·게임·거래·완료 기록을 삭제하지 않습니다.
+   - 누락된 열, 함수, 인덱스와 권한만 멱등 방식으로 추가·갱신합니다.
+3. Netlify 환경변수 4개를 유지합니다.
    - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY` (`sb_secret_...` 또는 기존 `eyJ...` service_role)
-   - `JWT_SECRET`
+   - `SUPABASE_SERVICE_ROLE_KEY` (`sb_secret_...` 또는 legacy `service_role`)
+   - `JWT_SECRET` (충분히 긴 임의 문자열)
    - `INITIAL_ADMIN_PASSWORD`
-4. GitHub 연동 자동 빌드를 꺼둔 경우 Netlify에서 **Deploys → Trigger deploy → Clear cache and deploy site**를 한 번 실행합니다.
-5. 배포 후 `https://사이트주소/api/health`를 엽니다.
+4. GitHub에 Commit/Push한 뒤 Netlify에서 새 배포를 실행합니다.
+5. `https://사이트주소/api/health`를 확인합니다.
 
-정상 예시:
+정상 응답 예시:
 
 ```json
 {
@@ -60,44 +33,51 @@ V5 이전의 실제 v4 원본에서 사용한 구성을 그대로 복원했습�
   "database": true,
   "adminInitialized": true,
   "transport": "direct-rest",
-  "schema": "v5-compatible",
-  "version": "8.1.0"
+  "schema": "zip-market-v8.2",
+  "version": "8.2.0"
 }
 ```
 
-6. 관리자 로그인은 현재 Netlify의 `INITIAL_ADMIN_PASSWORD` 값으로 확인합니다.
-7. 기존에 등록된 참가자의 사번과 비밀번호로 사용자 로그인을 확인합니다.
+그 후 관리자 로그인 → 참가자 로그인 순서로 확인합니다.
 
-## 유지된 기능
+## 이미 v8.1을 배포했고 스키마만 빠진 경우
 
-- 사용자·관리자 로그인 및 로그인 복원
-- Supabase 연동
-- 참가자 개별·일괄 등록, 검색 초기화, 삭제
-- 크레딧 지급·차감·고정 금액 결제
-- 관리자 결제 QR, 중복 결제 방지
-- iPhone 카메라 및 사진 QR 인식
-- 게임 추가·삭제·완료 QR·중복 완료 방지·보상
-- 모바일·PC 뒤로가기 내부 기록
+`supabase/schema-repair.sql` 전체만 Supabase SQL Editor에서 실행해도 됩니다. 이 파일은 `schema.sql`과 동일한 안전한 멱등 복구 SQL입니다. 스키마 복구 후 PostgREST 캐시가 즉시 갱신되도록 마지막에 `notify pgrst, 'reload schema'`가 포함되어 있습니다.
+
+## 환경 파일 주의
+
+- `.env.example`: 변수 **이름만** 있으므로 GitHub 업로드 가능
+- `.env`: 실제 비밀값이 있으므로 GitHub 업로드 금지
+- 브라우저 코드에는 Supabase Secret Key가 포함되지 않습니다.
+
+## 유지·검증한 기능
+
+- 사용자 로그인: 사번 + 비밀번호
+- 관리자 로그인 및 관리자 비밀번호 변경/복구
+- Supabase 직접 REST 연동(Realtime/WebSocket 의존성 없음)
+- 참가자 개별·Excel 붙여넣기 등록, 검색 초기화, +100C 지급, 삭제
+- 100/200/300C 결제, 관리자 자유 금액 결제 QR
+- iPhone 호환 QR 카메라·사진 스캔 (`html5-qrcode`)
+- 게임 목록, 게임 추가·완료 QR·삭제, 참가자 게임 완료
+- 모바일/PC 브라우저 뒤로가기 내부 화면 복원
 - 결제 팝업 우측 상단 X, 바깥 영역, ESC, 뒤로가기로 취소
-- 사용내역 최근 5개와 `⌄ 나머지 내역도 보기`
-- iPhone 13 mini(375px)에서 로고·결제·게임 이미지가 잘리지 않는 `object-fit: contain`
-- 로그인 데이터 묶음 반환과 병렬 조회
-- QR 라이브러리 지연 로딩
+- 사용내역 최근 5개와 아래 화살표 펼치기
+- iPhone 13 mini 대응 `object-fit: contain` 이미지
+- 제목/브랜드 `Jua`, 본문 `Pretendard` 우선 폰트 스택
+- 원본 로고·결제·게임 WebP 6개 포함
 
-## 폴더 구조
+## 로컬 정적 확인
 
-```text
-netlify/functions/api.mjs   Netlify 서버 API
-public/index.html           화면 구조
-public/styles.css           반응형 디자인 및 폰트
-src/app.js                  사용자·관리자 화면 동작
-supabase/schema.sql         기존 데이터 보존형 DB 보강 SQL
-scripts/build.mjs           dist 빌드
+```bash
+npm test
+npm run check
+python3 -m http.server 8888 -d public
 ```
 
-## 보안
+로컬 정적 서버에서는 UI를 확인할 수 있지만 API 로그인은 Netlify Function과 Supabase가 연결된 배포 환경에서 확인해야 합니다.
 
-- Supabase Secret/service_role 키는 브라우저 코드에 포함하지 않습니다.
-- 모든 DB 요청은 Netlify Function에서만 실행됩니다.
-- 로그인 세션과 QR payload는 `JWT_SECRET`으로 서명합니다.
-- 결제·관리자 크레딧 조정·게임 보상은 SQL 함수에서 처리해 중복 및 동시 요청을 방지합니다.
+## 데이터 삭제 동작
+
+- 참가자 삭제: 외래키 `ON DELETE CASCADE`로 해당 거래내역·게임 완료 기록도 삭제
+- 게임 삭제: 해당 게임의 참가자 완료 기록도 삭제
+- 두 작업 모두 관리자 JWT가 있어야 Netlify Function에서 실행됩니다.
