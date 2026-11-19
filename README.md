@@ -1,17 +1,13 @@
-# ZIP MARKET complete v3
-GitHub 저장소의 아래 항목을 모두 덮어쓴 뒤 Commit 하세요.
-- package.json
-- netlify.toml
-- public/
-- src/
-- netlify/functions/api.mjs
+# 관리자 LOGIN_FAILED 수정
 
-추가 기능
-- 게임 삭제
-- 참가자 삭제 (관련 transactions/game_completions는 FK cascade로 삭제)
-- 참가자 검색 초기화 버튼 수정
-- 새 게임의 기본 이미지: ORAC 4명이 GAME 노트북 앞에 모인 이미지
-- iPhone 카메라/사진 QR 스캔 유지
+원인: Supabase app_settings의 admin_password 해시가 예전에 설정한 INITIAL_ADMIN_PASSWORD 기준으로 남아있으면, Netlify 환경변수의 현재 비밀번호와 불일치하여 LOGIN_FAILED가 발생합니다.
 
-주의: 테이블 DELETE 권한이 없다면 Supabase SQL Editor에서 아래를 실행하세요.
-grant delete on table public.participants, public.games, public.transactions, public.game_completions to service_role;
+수정: admin/login에서 DB 해시 검증이 실패하더라도 사용자가 입력한 값이 현재 Netlify의 INITIAL_ADMIN_PASSWORD와 정확히 같으면, DB의 admin_password 해시를 현재 비밀번호로 자동 동기화한 뒤 로그인합니다.
+
+적용:
+1. GitHub의 `netlify/functions/api.mjs`만 이 파일로 교체
+2. Commit
+3. Netlify 배포
+4. Netlify Environment Variables의 `INITIAL_ADMIN_PASSWORD`에 설정된 값을 관리자 로그인에 입력
+
+다른 UI 파일은 바꿀 필요가 없습니다.
