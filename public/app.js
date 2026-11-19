@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const VERSION = '8.3.0';
+  const VERSION = '8.4.0';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const views = { login: $('#login-view'), participant: $('#participant-view'), admin: $('#admin-view') };

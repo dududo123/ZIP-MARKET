@@ -1,0 +1,99 @@
+import assert from 'node:assert/strict';
+
+process.env.SUPABASE_URL='https://mock.supabase.co';
+process.env.SUPABASE_SERVICE_ROLE_KEY='sb_secret_mock';
+process.env.JWT_SECRET='a-very-long-mock-jwt-secret-for-tests';
+process.env.INITIAL_ADMIN_PASSWORD='admin1234';
+
+const participantId='11111111-1111-1111-1111-111111111111';
+const gameId='22222222-2222-2222-2222-222222222222';
+const calls=[];
+const jsonResponse=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}});
+globalThis.fetch=async(url,options={})=>{
+  const body=options.body?JSON.parse(options.body):null;
+  calls.push({url:String(url),method:options.method||'GET',body});
+  const u=String(url);
+  if(u.endsWith('/rpc/zip_market_initialize_admin')) return jsonResponse({initialized:true,createdNow:false});
+  if(u.endsWith('/rpc/zip_market_auth_admin')) return jsonResponse({authenticated:body.p_password==='admin1234'});
+  if(u.endsWith('/rpc/zip_market_auth_participant')) {
+    if(body.p_employee_no==='TEST001'&&body.p_password==='1234') return jsonResponse({authenticated:true,participant:{id:participantId,employee_no:'TEST001',name:'테스트',credit_balance:1000}});
+    return jsonResponse({authenticated:false});
+  }
+  if(u.endsWith('/rpc/zip_market_pay_credit')) return jsonResponse({ok:true,balance:900});
+  if(u.endsWith('/rpc/zip_market_complete_game')) return jsonResponse({ok:true,gameId,reward:100,balance:1100});
+  if(u.endsWith('/rpc/zip_market_grant_credit')) return jsonResponse({ok:true,balance:1100});
+  if(u.endsWith('/rpc/zip_market_admin_create_participant')) return jsonResponse({id:participantId,employee_no:body.p_employee_no,name:body.p_name,credit_balance:body.p_initial_credit});
+  if(u.endsWith('/rpc/zip_market_set_admin_password')) return jsonResponse({updated:true});
+  if((options.method||'GET')==='DELETE') return new Response(null,{status:204});
+  if((options.method||'GET')==='POST'&&u.includes('/games?')) return jsonResponse([{id:gameId,name:body.name,image_url:body.image_url}],201);
+  if(u.includes('/participants?')) return jsonResponse([{id:participantId,employee_no:'TEST001',name:'테스트',credit_balance:1000,created_at:'2026-01-01T00:00:00Z'}]);
+  if(u.includes('/transactions?')) return jsonResponse([{id:'t1',amount:-100,type:'payment',description:'테스트 결제',balance_after:900,created_at:'2026-01-01T00:00:00Z'}]);
+  if(u.includes('/games?')) return jsonResponse([{id:gameId,name:'풍선 게임',image_url:'/assets/game-balloon.webp'}]);
+  if(u.includes('/game_completions?')) return jsonResponse([]);
+  return jsonResponse({message:'unhandled mock route'},500);
+};
+
+const {default:handler}=await import('../netlify/functions/api.mjs');
+const request=(path,method='GET',body,token,direct=false)=>new Request(
+  `https://zip-market.test${direct?`/.netlify/functions/api${path}`:`/api${path}`}`,
+  {method,headers:{...(body!==undefined?{'content-type':'application/json'}:{}),...(token?{authorization:`Bearer ${token}`}:{})},body:body===undefined?undefined:JSON.stringify(body)}
+);
+
+// /api/health and direct Function route.
+for (const direct of [false,true]) {
+  const res=await handler(request('/health','GET',undefined,undefined,direct));
+  assert.ok(res instanceof Response);assert.equal(res.status,200);
+  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.4');assert.equal(body.version,'8.4.0');
+}
+assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_initialize_admin')).body,{p_initial_password:'admin1234'});
+
+// Administrator login success and failure.
+const adminSuccess=await handler(request('/auth/admin','POST',{password:'admin1234'}));
+assert.equal(adminSuccess.status,200);const adminBody=await adminSuccess.json();assert.equal(adminBody.role,'admin');assert.ok(adminBody.token);
+assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_auth_admin')).body,{p_initial_password:'admin1234',p_password:'admin1234'});
+const adminFailure=await handler(request('/auth/admin','POST',{password:'wrong'}));
+assert.equal(adminFailure.status,401);assert.equal((await adminFailure.json()).code,'LOGIN_FAILED');
+
+// Participant login success and failure, including dashboard transactions.
+const userSuccess=await handler(request('/auth/participant','POST',{employeeNo:'TEST001',password:'1234'}));
+assert.equal(userSuccess.status,200);const userBody=await userSuccess.json();assert.equal(userBody.participant.employee_no,'TEST001');assert.equal(userBody.transactions[0].balance_after,900);assert.ok(userBody.token);
+assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_auth_participant')).body,{p_employee_no:'TEST001',p_password:'1234'});
+const userFailure=await handler(request('/auth/participant','POST',{employeeNo:'TEST001',password:'wrong'}));
+assert.equal(userFailure.status,401);assert.equal((await userFailure.json()).code,'LOGIN_FAILED');
+
+// Payment and game completion.
+const payment=await handler(request('/participant/pay','POST',{amount:100,description:'테스트 결제'},userBody.token));
+assert.equal(payment.status,200);
+assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_pay_credit')).body,{p_participant_id:participantId,p_amount:100,p_description:'테스트 결제'});
+const invalidPayment=await handler(request('/participant/pay','POST',{amount:0},userBody.token));
+assert.equal(invalidPayment.status,400);assert.equal((await invalidPayment.json()).code,'INVALID_AMOUNT');
+const completion=await handler(request('/participant/complete-game','POST',{gameId},userBody.token));
+assert.equal(completion.status,200);
+assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_complete_game')).body,{p_participant_id:participantId,p_game_id:gameId});
+
+// Admin create/grant/password and both deletion routes.
+const createParticipant=await handler(request('/admin/participants','POST',{employeeNo:'NEW001',name:'신규',password:'1234',initialCredit:500},adminBody.token));
+assert.equal(createParticipant.status,201);
+const grant=await handler(request(`/admin/participants/${participantId}/credit`,'POST',{amount:100},adminBody.token));
+assert.equal(grant.status,200);
+const password=await handler(request('/admin/password','POST',{password:'next1234'},adminBody.token));
+assert.equal(password.status,200);
+const createGame=await handler(request('/admin/games','POST',{name:'새 게임',imageUrl:'/assets/game-default.svg'},adminBody.token));
+assert.equal(createGame.status,201);
+const deleteGame=await handler(request(`/admin/games/${gameId}`,'DELETE',undefined,adminBody.token));
+assert.equal(deleteGame.status,200);
+const deleteParticipant=await handler(request(`/admin/participants/${participantId}`,'DELETE',undefined,adminBody.token));
+assert.equal(deleteParticipant.status,200);
+
+const deletes=calls.filter(c=>c.method==='DELETE').map(c=>c.url.split('/rest/v1/')[1]);
+assert.deepEqual(deletes.slice(0,2),[`game_completions?game_id=eq.${gameId}`,`games?id=eq.${gameId}`]);
+assert.deepEqual(deletes.slice(2,5),[`game_completions?participant_id=eq.${participantId}`,`transactions?participant_id=eq.${participantId}`,`participants?id=eq.${participantId}`]);
+
+const unauth=await handler(request('/admin/dashboard'));
+assert.equal(unauth.status,401);assert.equal((await unauth.json()).code,'AUTH_REQUIRED');
+const missing=await handler(request('/unknown'));
+assert.equal(missing.status,404);assert.equal((await missing.json()).code,'NOT_FOUND');
+const options=await handler(request('/health','OPTIONS'));
+assert.equal(options.status,204);
+
+console.log('api.routes.test: /api health, direct route, admin/user success+failure, payment, games, CRUD, deletion order, auth and 404 passed');

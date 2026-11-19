@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-const VERSION = '8.3.0';
+const VERSION = '8.4.0';
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -124,7 +124,7 @@ async function health() {
     adminCreatedNow: Boolean(initialized?.createdNow),
     transport: 'direct-rest',
     runtime: 'netlify-modern-response',
-    schema: 'zip-market-v8.3',
+    schema: 'zip-market-v8.4',
     version: VERSION
   };
 }
