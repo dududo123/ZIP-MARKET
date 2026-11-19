@@ -1,20 +1,20 @@
 [build]
   command = "npm run build"
-  publish = "public"
+  publish = "dist"
   functions = "netlify/functions"
 
 [build.environment]
   NODE_VERSION = "22"
-  NPM_FLAGS = "--no-audit --no-fund"
 
 [functions]
   node_bundler = "esbuild"
-  included_files = []
+  included_files = ["package.json"]
 
 [[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/api/:splat"
   status = 200
+  force = true
 
 [[headers]]
   for = "/assets/*"
@@ -24,7 +24,7 @@
 [[headers]]
   for = "/app.js"
   [headers.values]
-    Cache-Control = "public, max-age=0, must-revalidate"
+    Cache-Control = "public, max-age=3600, must-revalidate"
 
 [[headers]]
   for = "/*"

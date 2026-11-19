@@ -1,13 +1,13 @@
 {
-  "name": "zip-market-netlify",
-  "version": "6.0.0",
+  "name": "zip-market-v7-login-font-fix",
+  "version": "7.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22 <23" },
-  "scripts": {
-    "build": "node scripts/build-copy.mjs",
-    "check": "npm run build && node --check netlify/functions/api.mjs && node scripts/project-check.mjs"
+  "engines": {
+    "node": ">=22"
   },
-  "dependencies": {},
-  "devDependencies": {}
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check src/app.js && node --check netlify/functions/api.mjs && node --check scripts/build.mjs"
+  }
 }

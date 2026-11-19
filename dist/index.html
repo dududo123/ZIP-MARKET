@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#fff9ef">
+  <meta name="description" content="ZIP! MARKET — UNZIP YOUR GOODS">
+  <title>ZIP! MARKET</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Jua&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet"></noscript>
+  <link rel="preload" href="/assets/logo.webp?v=7" as="image" type="image/webp">
+  <link rel="stylesheet" href="/styles.css?v=7.0.0">
+  <script defer src="/app.js?v=7.0.0"></script>
+</head>
+<body>
+  <header class="topbar"><strong><span>ZIP!</span> MARKET</strong><span id="statusBadge" class="status-badge" hidden></span></header>
+  <main id="app" class="app-shell" aria-live="polite">
+    <section id="loginView" class="view login-view">
+      <div class="login-card doodle-card">
+        <img class="login-logo" src="/assets/logo.webp?v=7" alt="ZIP! MARKET — UNZIP YOUR GOODS" width="900" height="600">
+        <h1>UNZIP YOUR GOODS</h1>
+        <form id="loginForm" novalidate>
+          <label class="sr-only" for="employeeId">사번</label>
+          <input id="employeeId" name="employeeId" inputmode="text" autocomplete="username" placeholder="사번" required>
+          <label class="sr-only" for="userPassword">비밀번호</label>
+          <input id="userPassword" name="password" type="password" autocomplete="current-password" placeholder="비밀번호" required>
+          <button class="primary wide" type="submit">ZIP 마켓 입장</button>
+        </form>
+        <button id="openAdminLogin" class="link-button" type="button">관리자 로그인</button>
+      </div>
+    </section>
+
+    <section id="userView" class="view" hidden>
+      <div class="page-heading">
+        <div><p class="eyebrow">ZIP! MARKET</p><h1><span id="userName">사용자</span>님, 반가워요!</h1></div>
+        <button class="secondary compact" data-action="logout" type="button">로그아웃</button>
+      </div>
+      <article class="balance-card doodle-card"><span>남은 크레딧</span><strong id="creditBalance">0 C</strong></article>
+      <section class="section-block">
+        <div class="section-title"><div><p class="eyebrow">CREDIT SHOP</p><h2>크레딧 결제</h2></div><button id="openQrScanner" class="secondary compact" type="button">QR 스캔</button></div>
+        <div id="paymentCards" class="image-card-grid"></div>
+      </section>
+      <section class="section-block">
+        <div class="section-title"><div><p class="eyebrow">PLAY &amp; EARN</p><h2>GAME</h2></div></div>
+        <div id="gameCards" class="image-card-grid games-grid"></div>
+      </section>
+      <section class="section-block history-block">
+        <div class="section-title"><div><p class="eyebrow">MY RECORD</p><h2>사용내역</h2></div></div>
+        <div id="historyList" class="history-list"></div>
+        <button id="toggleHistory" class="history-toggle" type="button" hidden><span>⌄</span> 나머지 내역도 보기</button>
+      </section>
+    </section>
+
+    <section id="adminView" class="view" hidden>
+      <div class="page-heading">
+        <div><p class="eyebrow">ZIP! CONTROL ROOM</p><h1>관리자 페이지</h1></div>
+        <button class="secondary compact" data-action="logout" type="button">로그아웃</button>
+      </div>
+      <div class="admin-grid">
+        <section class="admin-panel doodle-card">
+          <h2>참가자 등록</h2>
+          <form id="participantForm" class="stack-form">
+            <input name="employeeId" placeholder="사번" required>
+            <input name="name" placeholder="이름" required>
+            <input name="password" type="password" placeholder="초기 비밀번호" required>
+            <input name="credits" type="number" min="0" step="1" value="0" placeholder="초기 크레딧" required>
+            <button class="primary" type="submit">참가자 추가</button>
+          </form>
+          <details class="bulk-details"><summary>Excel 붙여넣기 일괄 등록</summary><p>사번, 이름, 비밀번호, 초기 크레딧 순서로 탭 또는 쉼표로 구분하세요.</p><textarea id="bulkParticipants" rows="6" placeholder="TEST001&#9;테스트&#9;1234&#9;1000"></textarea><button id="bulkAddButton" class="secondary wide" type="button">일괄 등록</button></details>
+        </section>
+        <section class="admin-panel doodle-card">
+          <h2>결제 QR 만들기</h2>
+          <form id="paymentQrForm" class="stack-form"><input name="amount" type="number" min="1" step="1" placeholder="결제 크레딧" required><button class="primary" type="submit">결제 QR 생성</button></form>
+          <h2 class="subheading">게임 추가</h2>
+          <form id="gameForm" class="stack-form"><input name="name" placeholder="게임 이름" required><input name="imageUrl" placeholder="이미지 URL (비우면 기본 이미지)"><input name="reward" type="number" min="0" step="1" value="100" placeholder="보상 크레딧" required><button class="primary" type="submit">게임 추가</button></form>
+        </section>
+      </div>
+      <section class="admin-panel doodle-card list-panel">
+        <div class="section-title"><h2>참가자 관리</h2><div class="search-row"><input id="participantSearch" type="search" placeholder="사번 또는 이름 검색"><button id="resetSearch" class="secondary compact" type="button">초기화</button></div></div>
+        <div id="participantList" class="admin-list"></div>
+      </section>
+      <section class="admin-panel doodle-card list-panel"><div class="section-title"><h2>게임 관리</h2></div><div id="adminGameList" class="admin-list"></div></section>
+      <section class="admin-panel doodle-card password-panel"><h2>관리자 비밀번호 변경</h2><form id="adminPasswordForm" class="inline-form"><input name="password" type="password" minlength="4" placeholder="새 비밀번호" required><button class="primary" type="submit">변경</button></form></section>
+    </section>
+  </main>
+
+  <div id="adminLoginModal" class="modal" hidden aria-hidden="true"><div class="modal-backdrop" data-close-modal="adminLoginModal"></div><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="adminLoginTitle"><button class="modal-close" data-close-modal="adminLoginModal" type="button" aria-label="닫기">×</button><p class="eyebrow">ZIP! STAFF ONLY</p><h2 id="adminLoginTitle">관리자 로그인</h2><p class="muted">ZIP! MARKET 운영자 비밀번호를 입력하세요.</p><form id="adminLoginForm" class="stack-form"><label for="adminPassword">관리자 비밀번호</label><input id="adminPassword" name="password" type="password" autocomplete="current-password" required><button class="primary wide" type="submit">관리자 페이지 열기</button></form></section></div>
+
+  <div id="paymentModal" class="modal" hidden aria-hidden="true"><div class="modal-backdrop" data-close-modal="paymentModal"></div><section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="paymentTitle"><button class="modal-close" data-close-modal="paymentModal" type="button" aria-label="결제창 닫기">×</button><p class="eyebrow">CREDIT PAYMENT</p><h2 id="paymentTitle">크레딧 결제</h2><p id="paymentDescription" class="payment-description"></p><div class="modal-actions"><button class="secondary" data-close-modal="paymentModal" type="button">취소</button><button id="confirmPayment" class="primary" type="button">결제 확인</button></div></section></div>
+
+  <div id="qrModal" class="modal" hidden aria-hidden="true"><div class="modal-backdrop" data-close-modal="qrModal"></div><section class="modal-card qr-modal-card" role="dialog" aria-modal="true" aria-labelledby="qrTitle"><button class="modal-close" data-close-modal="qrModal" type="button" aria-label="QR 창 닫기">×</button><p class="eyebrow">ZIP! QR</p><h2 id="qrTitle">QR 스캔</h2><div id="qrReader" class="qr-reader"></div><div class="qr-actions"><button id="startCamera" class="primary" type="button">카메라 시작</button><label class="secondary file-button">사진에서 QR 읽기<input id="qrFile" type="file" accept="image/*" capture="environment"></label></div><p class="muted tiny">iPhone Safari·네이버 앱에서는 카메라 권한을 허용하세요. 카메라가 막히면 사진에서 읽기를 이용할 수 있습니다.</p></section></div>
+
+  <div id="generatedQrModal" class="modal" hidden aria-hidden="true"><div class="modal-backdrop" data-close-modal="generatedQrModal"></div><section class="modal-card qr-result-card" role="dialog" aria-modal="true" aria-labelledby="generatedQrTitle"><button class="modal-close" data-close-modal="generatedQrModal" type="button" aria-label="QR 창 닫기">×</button><h2 id="generatedQrTitle">QR 코드</h2><canvas id="generatedQrCanvas"></canvas><p id="generatedQrCaption"></p></section></div>
+
+  <div id="toast" class="toast" role="status" aria-live="assertive" hidden></div>
+  <div id="loading" class="loading" hidden><span class="spinner"></span><strong>ZIP 여는 중...</strong></div>
+  <noscript>이 사이트를 이용하려면 JavaScript를 켜 주세요.</noscript>
+</body>
+</html>

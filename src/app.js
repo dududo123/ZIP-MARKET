@@ -1,175 +1,287 @@
-const $ = (s, root = document) => root.querySelector(s);
-const $$ = (s, root = document) => [...root.querySelectorAll(s)];
-const state = {
-  view: 'login', userTab: 'pay', adminTab: 'participants', modal: null,
-  userToken: sessionStorage.getItem('zipUserToken') || '',
-  adminToken: sessionStorage.getItem('zipAdminToken') || '',
-  dashboard: null, participants: [], adminGames: [], historyExpanded: false,
-  pendingAction: null, scanner: null, scanning: false
-};
+const $ = selector => document.querySelector(selector);
+const $$ = selector => [...document.querySelectorAll(selector)];
 const views = { login: $('#loginView'), user: $('#userView'), admin: $('#adminView') };
-const payProducts = [
-  { amount: 100, name: 'ZIP 100 C', image: '/assets/pay-100.webp' },
-  { amount: 200, name: 'ZIP 200 C', image: '/assets/pay-200.webp' },
-  { amount: 300, name: 'ZIP 300 C', image: '/assets/pay-300.webp' }
-];
+const state = {
+  token: localStorage.getItem('zipToken') || '',
+  role: localStorage.getItem('zipRole') || '',
+  user: null,
+  admin: { participants: [], games: [] },
+  showAllHistory: false,
+  pendingPayment: 0,
+  scanner: null,
+  scanning: false
+};
 
-function escapeHtml(value = '') { return String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
-function formatDate(value) { try { return new Intl.DateTimeFormat('ko-KR',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(value)); } catch { return ''; } }
-function makeId(){ return globalThis.crypto?.randomUUID?.() || `zm-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
-function toast(message, type = '') {
-  const el = document.createElement('div'); el.className = `toast ${type}`; el.textContent = message; $('#toastRegion').append(el);
-  setTimeout(() => el.remove(), 3600);
+const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;' }[char]));
+const formatNumber = value => Number(value || 0).toLocaleString('ko-KR');
+const formatDate = value => new Intl.DateTimeFormat('ko-KR', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).format(new Date(value));
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const scriptLoads = new Map();
+function loadScript(src, globalName) {
+  if (window[globalName]) return Promise.resolve(window[globalName]);
+  if (!scriptLoads.has(src)) scriptLoads.set(src, new Promise((resolve, reject) => {
+    const script = document.createElement('script'); script.src = src; script.async = true;
+    script.onload = () => window[globalName] ? resolve(window[globalName]) : reject(new Error(`${globalName} 로드 실패`));
+    script.onerror = () => reject(new Error(`${globalName} 네트워크 로드 실패`));
+    document.head.append(script);
+  }));
+  return scriptLoads.get(src);
 }
-function setBusy(button, busy, text = '처리 중') {
-  if (!button) return; if (busy) { button.dataset.oldText = button.textContent; button.textContent = text; button.classList.add('loading'); button.disabled = true; }
-  else { button.textContent = button.dataset.oldText || button.textContent; button.classList.remove('loading'); button.disabled = false; }
-}
-async function api(path, { method = 'GET', body, token } = {}) {
-  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 15000);
-  try {
-    const response = await fetch(`/api${path}`, {
-      method, signal: controller.signal, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) })
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.message || data.error || `요청 실패 (${response.status})`);
-    $('#connectionBadge').textContent = 'ONLINE'; return data;
-  } catch (error) {
-    if (error.name === 'AbortError') throw new Error('서버 응답이 늦습니다. 잠시 후 다시 시도해 주세요.');
-    if (!navigator.onLine) $('#connectionBadge').textContent = 'OFFLINE'; throw error;
-  } finally { clearTimeout(timer); }
-}
-function authToken(role) { return role === 'admin' ? state.adminToken : state.userToken; }
+const loadQrScanner = () => loadScript('https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js','Html5Qrcode');
+const loadQrGenerator = () => loadScript('https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js','QRCode');
 
-function bootstrapHistory() {
-  history.replaceState({ zipMarket: true, view: 'login', guard: true }, '', location.pathname);
-  history.pushState({ zipMarket: true, view: 'login' }, '', location.pathname);
+function setLoading(on, label = 'ZIP 여는 중...') {
+  $('#loading strong').textContent = label;
+  $('#loading').hidden = !on;
+  $$('button').forEach(button => { if (on && button.type === 'submit') button.dataset.wasDisabled = String(button.disabled); });
 }
-function navigate(view, { replace = false, tab, noFocus = false } = {}) {
-  state.view = view; if (view === 'user' && tab) state.userTab = tab; if (view === 'admin' && tab) state.adminTab = tab;
-  const payload = { zipMarket: true, view, userTab: state.userTab, adminTab: state.adminTab };
-  history[replace ? 'replaceState' : 'pushState'](payload, '', location.pathname); render(); if (!noFocus) $('#app').focus({preventScroll:true});
-}
-window.addEventListener('popstate', event => {
-  if (state.modal) { closeModal(false); return; }
-  if (!event.state?.zipMarket) { history.pushState({zipMarket:true,view:state.view},'',location.pathname); toast('ZIP! MARKET 첫 화면입니다.'); return; }
-  state.view = event.state.view || 'login'; state.userTab = event.state.userTab || state.userTab; state.adminTab = event.state.adminTab || state.adminTab; render();
-});
-function render() {
-  Object.entries(views).forEach(([name, el]) => el.hidden = name !== state.view);
-  if (state.view === 'user') renderUser(); if (state.view === 'admin') renderAdmin();
+let toastTimer;
+function toast(message, kind = '') {
+  clearTimeout(toastTimer);
+  const el = $('#toast'); el.textContent = message; el.className = `toast ${kind}`.trim(); el.hidden = false;
+  toastTimer = setTimeout(() => { el.hidden = true; }, kind === 'error' ? 6500 : 3200);
 }
 
-function openModal(name, { push = true } = {}) {
-  state.modal = name; $('#modalRoot').hidden = false; $$('.modal').forEach(m => m.hidden = m.id !== name);
-  document.body.style.overflow = 'hidden'; if (push) history.pushState({zipMarket:true,view:state.view,modal:name},'',location.pathname);
-  setTimeout(() => $(`#${name} input:not([type=file]), #${name} button`)?.focus(), 30);
+async function api(path, options = {}) {
+  const headers = { 'content-type':'application/json', ...(options.headers || {}) };
+  if (state.token) headers.authorization = `Bearer ${state.token}`;
+  const response = await fetch(`/api${path}`, { method: options.method || 'GET', headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
+  let data;
+  try { data = await response.json(); } catch { data = { message:`서버 응답을 읽지 못했습니다. (HTTP ${response.status})` }; }
+  if (!response.ok || data.ok === false) {
+    const error = new Error(data.message || '요청을 처리하지 못했습니다.'); error.code = data.code; error.detail = data.detail; error.status = response.status; throw error;
+  }
+  return data;
 }
-async function closeModal(useHistory = true) {
-  if (!state.modal) return; const wasScanner = state.modal === 'scannerModal'; state.modal = null; $('#modalRoot').hidden = true; $$('.modal').forEach(m => m.hidden = true); document.body.style.overflow = '';
-  if (wasScanner) await stopScanner(); if (useHistory && history.state?.modal) history.back();
+function friendlyError(error) {
+  const map = {
+    ENV_MISSING:'Netlify 환경변수가 빠져 있습니다. /api/health의 detail을 확인하세요.',
+    DATABASE_ERROR:'Supabase 연결 또는 schema.sql 권한을 확인하세요.',
+    LOGIN_FAILED:error.message,
+    INSUFFICIENT_CREDIT:'크레딧이 부족합니다.', DUPLICATE_PAYMENT:'이미 사용한 결제 QR입니다.',
+    ALREADY_COMPLETED:'이미 완료 보상을 받은 게임입니다.', TOKEN_EXPIRED:'로그인이 만료되었습니다. 다시 로그인해 주세요.',
+    INVALID_QR:'유효하지 않거나 만료된 QR입니다.'
+  };
+  return map[error.code] || error.message || '오류가 발생했습니다.';
 }
-$$('[data-close-modal]').forEach(el => el.addEventListener('click', () => closeModal()));
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && state.modal) closeModal(); });
+function saveAuth(token, role) {
+  state.token = token; state.role = role;
+  localStorage.setItem('zipToken', token); localStorage.setItem('zipRole', role);
+}
+function clearAuth() {
+  state.token = ''; state.role = ''; state.user = null; state.admin = { participants:[], games:[] };
+  localStorage.removeItem('zipToken'); localStorage.removeItem('zipRole');
+}
 
-$('#userLoginForm').addEventListener('submit', async e => {
-  e.preventDefault(); const button = $('button[type=submit]', e.currentTarget); const body = Object.fromEntries(new FormData(e.currentTarget)); setBusy(button,true,'ZIP 여는 중');
-  try { const result = await api('/user/login',{method:'POST',body}); state.userToken = result.token; sessionStorage.setItem('zipUserToken',result.token); state.dashboard = result.dashboard; e.currentTarget.reset(); navigate('user',{tab:'pay'}); toast('ZIP! MARKET에 입장했습니다.','success'); }
-  catch (error) { toast(`로그인 실패: ${error.message}`,'error'); }
-  finally { setBusy(button,false); }
-});
-$('#openAdminLogin').addEventListener('click', () => openModal('adminLoginModal'));
-$('#adminLoginForm').addEventListener('submit', async e => {
-  e.preventDefault(); const button = $('button[type=submit]',e.currentTarget); const password = new FormData(e.currentTarget).get('password'); setBusy(button,true,'확인 중');
-  try { const result = await api('/admin/login',{method:'POST',body:{password}}); state.adminToken = result.token; sessionStorage.setItem('zipAdminToken',result.token); await closeModal(false); e.currentTarget.reset(); navigate('admin',{tab:'participants'}); await loadAdminData(); toast('관리자 페이지를 열었습니다.','success'); }
-  catch(error){ toast(`관리자 로그인 실패: ${error.message}`,'error'); }
-  finally{ setBusy(button,false); }
-});
-$('#userLogout').addEventListener('click',() => { sessionStorage.removeItem('zipUserToken'); state.userToken=''; state.dashboard=null; navigate('login'); });
-$('#adminLogout').addEventListener('click',() => { sessionStorage.removeItem('zipAdminToken'); state.adminToken=''; state.participants=[]; state.adminGames=[]; navigate('login'); });
-$$('[data-go="login"]').forEach(b=>b.addEventListener('click',()=>navigate('login')));
+function showView(name) {
+  Object.entries(views).forEach(([key, view]) => { view.hidden = key !== name; });
+  $('#statusBadge').hidden = name === 'login';
+  $('#statusBadge').textContent = name === 'admin' ? 'ADMIN' : name === 'user' ? 'MEMBER' : '';
+  window.scrollTo({ top:0, behavior:'instant' });
+}
+function navigate(view, replace = false) {
+  const next = { view };
+  if (replace) history.replaceState(next, '', location.pathname); else history.pushState(next, '', location.pathname);
+  applyHistory(next);
+}
+function closeAllModals() {
+  $$('.modal').forEach(modal => { modal.hidden = true; modal.setAttribute('aria-hidden','true'); });
+  stopScanner();
+}
+function openModal(id, fromHistory = false) {
+  closeAllModals();
+  const modal = document.getElementById(id); if (!modal) return;
+  modal.hidden = false; modal.setAttribute('aria-hidden','false');
+  if (!fromHistory) history.pushState({ ...(history.state || { view:'login' }), modal:id }, '', location.pathname);
+  requestAnimationFrame(() => modal.querySelector('input,button')?.focus());
+}
+function closeModal(id) {
+  if (history.state?.modal === id) history.back();
+  else { document.getElementById(id).hidden = true; stopScanner(); }
+}
+function applyHistory(entry = {}) {
+  closeAllModals();
+  let view = entry.view || 'login';
+  if (view === 'user' && (!state.token || state.role !== 'user')) view = 'login';
+  if (view === 'admin' && (!state.token || state.role !== 'admin')) view = 'login';
+  showView(view);
+  if (entry.modal) openModal(entry.modal, true);
+}
+window.addEventListener('popstate', event => applyHistory(event.state || { view:'login' }));
 
+function applyUserSnapshot(data) {
+  state.user = { participant:data.participant, transactions:data.transactions || [], games:data.games || [], completedGameIds:data.completedGameIds || [] };
+  renderUser();
+}
+function gameImage(game) {
+  const name = String(game.name || '').toLowerCase();
+  if (name.includes('탁구') || name.includes('핑퐁') || name.includes('ping')) return '/assets/game-pingpong.webp?v=7';
+  if (name.includes('풍선') || name.includes('balloon')) return '/assets/game-balloon.webp?v=7';
+  return game.image_url || '/assets/game-default.webp?v=7';
+}
 function renderUser() {
-  if (!state.dashboard) return; const d = state.dashboard; $('#userName').textContent = d.user.name; $('#creditBalance').textContent = `${Number(d.user.credits||0).toLocaleString()} C`;
-  $$('.tab[data-user-tab]').forEach(b => b.classList.toggle('active',b.dataset.userTab===state.userTab));
-  ['pay','games','history'].forEach(tab => $(`#${tab}Panel`).hidden = tab !== state.userTab);
-  renderPay(); renderGames(); renderTransactions();
+  const snapshot = state.user; if (!snapshot) return;
+  $('#userName').textContent = snapshot.participant.name;
+  $('#creditBalance').textContent = `${formatNumber(snapshot.participant.credits)} C`;
+  const payments = [100,200,300];
+  $('#paymentCards').innerHTML = payments.map(amount => `<article class="image-card"><div class="image-frame"><img src="/assets/pay-${amount}.webp?v=7" alt="${amount} 크레딧 결제" width="900" height="600" loading="lazy"></div><div class="image-card-body"><div><h3>${formatNumber(amount)} C</h3><p>크레딧 결제</p></div><button class="primary" type="button" data-pay="${amount}">결제</button></div></article>`).join('');
+  const completed = new Set(snapshot.completedGameIds);
+  $('#gameCards').innerHTML = snapshot.games.length ? snapshot.games.map(game => `<article class="image-card ${completed.has(game.id) ? 'completed' : ''}"><div class="image-frame"><img src="${escapeHtml(gameImage(game))}" alt="${escapeHtml(game.name)}" width="900" height="600" loading="lazy" onerror="this.src='/assets/game-default.webp?v=7'"></div><div class="image-card-body"><div><h3>${escapeHtml(game.name)}</h3><p>완료 보상 +${formatNumber(game.reward)} C</p></div>${completed.has(game.id) ? '<span class="completed-label">완료</span>' : '<button class="primary" type="button" data-open-scan="1">QR 스캔</button>'}</div></article>`).join('') : '<div class="empty-state">등록된 게임이 없습니다.</div>';
+  renderHistory();
 }
-$$('[data-user-tab]').forEach(button => button.addEventListener('click',() => navigate('user',{tab:button.dataset.userTab})));
-function renderPay(){
-  $('#payGrid').innerHTML = payProducts.map(p => `<article class="shop-card"><div class="image-box"><img src="${p.image}" alt="${p.amount} 크레딧 결제 이미지" width="900" height="600"></div><div class="shop-card-body"><h3>${p.name}</h3><p>ZIP! MARKET에서 ${p.amount} 크레딧을 사용합니다.</p><div class="price">${p.amount} C</div><button class="primary" data-pay="${p.amount}" type="button">결제하기</button></div></article>`).join('');
-  $$('[data-pay]').forEach(b => b.addEventListener('click',()=>showPayConfirm(Number(b.dataset.pay))));
-}
-function showPayConfirm(amount){
-  const product=payProducts.find(p=>p.amount===amount); state.pendingAction=async()=>performPayment(amount,`${amount}C 상품 결제`);
-  $('#confirmTitle').textContent='크레딧 결제 확인'; $('#confirmBody').innerHTML=`<div class="confirm-product"><img src="${product.image}" alt=""><div><p>${escapeHtml(product.name)}</p><strong>${amount.toLocaleString()} C</strong><p>결제를 진행할까요?</p></div></div>`; $('#confirmAction').textContent='결제 확인'; openModal('confirmModal');
-}
-$('#confirmAction').addEventListener('click', async e => { if(!state.pendingAction)return; setBusy(e.currentTarget,true,'처리 중'); try{await state.pendingAction(); await closeModal();}catch(error){toast(error.message,'error');}finally{setBusy(e.currentTarget,false);state.pendingAction=null;} });
-async function performPayment(amount,description){ const result=await api('/user/pay',{method:'POST',token:state.userToken,body:{amount,description,idempotencyKey:makeId()}}); state.dashboard=result.dashboard; renderUser(); toast(`${amount} C 결제가 완료됐습니다.`,'success'); }
-function renderGames(){
-  const games=state.dashboard?.games||[], done=new Set(state.dashboard?.completedGames||[]);
-  $('#gameGrid').innerHTML=games.length?games.map(g=>`<article class="shop-card"><div class="image-box"><img src="${escapeHtml(g.image_url||'/assets/logo.webp')}" onerror="this.src='/assets/logo.webp'" alt="${escapeHtml(g.name)}" width="900" height="600"></div><div class="shop-card-body"><h3>${escapeHtml(g.name)}</h3><p>완료 시 ${Number(g.reward||0).toLocaleString()} C 지급</p>${done.has(g.code)?'<span class="completed-badge">완료</span>':'<button class="primary" data-scan-game="'+escapeHtml(g.code)+'" type="button">완료 QR 스캔</button>'}</div></article>`).join(''):'<div class="empty">등록된 게임이 없습니다.</div>';
-  $$('[data-scan-game]').forEach(b=>b.addEventListener('click',()=>openScanner()));
-}
-function renderTransactions(){
-  const tx=state.dashboard?.transactions||[], visible=state.historyExpanded?tx:tx.slice(0,5); $('#transactionList').innerHTML=visible.length?visible.map(t=>`<li class="transaction-item"><div><p>${escapeHtml(t.description||'크레딧 변동')}</p><time>${formatDate(t.created_at)}</time></div><span class="amount ${Number(t.amount)>=0?'plus':'minus'}">${Number(t.amount)>=0?'+':''}${Number(t.amount).toLocaleString()} C</span></li>`).join(''):'<li class="empty">아직 사용내역이 없습니다.</li>';
-  const toggle=$('#toggleHistory'); toggle.hidden=tx.length<=5; toggle.classList.toggle('expanded',state.historyExpanded); $('span',toggle).textContent=state.historyExpanded?'내역 접기':'나머지 내역도 보기';
-}
-$('#toggleHistory').addEventListener('click',()=>{state.historyExpanded=!state.historyExpanded;renderTransactions();});
-
-$('#openScanner').addEventListener('click',openScanner); $('#startCamera').addEventListener('click',startCamera); $('#qrFile').addEventListener('change',scanFile);
-function openScanner(){ openModal('scannerModal'); }
-async function startCamera(){
-  if(state.scanning)return; const button=$('#startCamera'); setBusy(button,true,'카메라 준비 중');
-  try{ if(!window.Html5Qrcode)throw new Error('QR 라이브러리를 불러오지 못했습니다.'); if(!state.scanner)state.scanner=new window.Html5Qrcode('qrReader',{verbose:false}); state.scanning=true; await state.scanner.start({facingMode:'environment'},{fps:10,qrbox:(w,h)=>{const s=Math.floor(Math.min(w,h)*.72);return{width:s,height:s};},aspectRatio:1},onQrDecoded,()=>{}); button.textContent='스캔 중'; }
-  catch(error){ state.scanning=false; setBusy(button,false); toast('카메라를 열 수 없습니다. 사진에서 읽기를 사용해 주세요.','error'); }
-}
-async function stopScanner(){
-  try{ if(state.scanner&&state.scanning)await state.scanner.stop(); if(state.scanner)await state.scanner.clear(); }catch{} state.scanner=null;state.scanning=false;setBusy($('#startCamera'),false);$('#startCamera').textContent='카메라 시작';$('#qrReader').innerHTML='';$('#qrFile').value='';
-}
-async function scanFile(e){ const file=e.target.files?.[0]; if(!file)return; try{if(!window.Html5Qrcode)throw new Error('QR 라이브러리를 불러오지 못했습니다.');if(!state.scanner)state.scanner=new window.Html5Qrcode('qrReader',{verbose:false}); const value=await state.scanner.scanFile(file,true); await onQrDecoded(value);}catch(error){toast('사진에서 QR을 찾지 못했습니다.','error');}}
-async function onQrDecoded(decoded){
-  if(!state.modal)return; await stopScanner(); let token=decoded;
-  try{const u=new URL(decoded);token=u.searchParams.get('token')||decoded;}catch{}
-  try{const parsed=JSON.parse(decoded);token=parsed.token||token;}catch{}
-  try{const result=await api('/user/scan',{method:'POST',token:state.userToken,body:{token}});state.dashboard=result.dashboard;renderUser();await closeModal();toast(result.message||'QR 처리가 완료됐습니다.','success');}catch(error){toast(error.message,'error');}
+function renderHistory() {
+  const history = state.user?.transactions || [];
+  const shown = state.showAllHistory ? history : history.slice(0,5);
+  $('#historyList').innerHTML = shown.length ? shown.map(item => `<article class="history-item"><div><p>${escapeHtml(item.description || item.type)}</p><small>${formatDate(item.created_at)} · 잔액 ${formatNumber(item.balance_after)} C</small></div><strong class="${item.amount >= 0 ? 'positive' : 'negative'}">${item.amount >= 0 ? '+' : ''}${formatNumber(item.amount)} C</strong></article>`).join('') : '<div class="empty-state">아직 사용내역이 없습니다.</div>';
+  const toggle = $('#toggleHistory'); toggle.hidden = history.length <= 5;
+  toggle.classList.toggle('expanded', state.showAllHistory);
+  toggle.innerHTML = state.showAllHistory ? '<span>⌄</span> 내역 접기' : '<span>⌄</span> 나머지 내역도 보기';
 }
 
-function renderAdmin(){
-  $$('.tab[data-admin-tab]').forEach(b=>b.classList.toggle('active',b.dataset.adminTab===state.adminTab));
-  const names={participants:'Participants',games:'Games',payment:'Payment',settings:'Settings'};Object.entries(names).forEach(([key,suffix])=>{$(`#admin${suffix}Panel`).hidden=key!==state.adminTab;});
-  renderParticipants(); renderAdminGames();
+function applyAdminSnapshot(data) {
+  state.admin = { participants:data.participants || [], games:data.games || [] };
+  renderAdmin();
 }
-$$('[data-admin-tab]').forEach(button=>button.addEventListener('click',()=>navigate('admin',{tab:button.dataset.adminTab})));
-async function loadAdminData(){
-  try{const [people,games]=await Promise.all([api('/admin/participants',{token:state.adminToken}),api('/admin/games',{token:state.adminToken})]);state.participants=people.participants||[];state.adminGames=games.games||[];renderAdmin();}catch(error){toast(`관리자 데이터 로딩 실패: ${error.message}`,'error');}
+function renderAdmin() {
+  renderParticipants();
+  $('#adminGameList').innerHTML = state.admin.games.length ? state.admin.games.map(game => `<article class="admin-row"><div><h3>${escapeHtml(game.name)}</h3><p>완료 보상 ${formatNumber(game.reward)} C</p></div><div class="row-actions"><button class="secondary" type="button" data-game-qr="${game.id}">완료 QR</button><button class="danger" type="button" data-delete-game="${game.id}" data-name="${escapeHtml(game.name)}">삭제</button></div></article>`).join('') : '<div class="empty-state">등록된 게임이 없습니다.</div>';
 }
-function renderParticipants(){
-  const q=$('#participantSearch').value.trim().toLowerCase(), rows=state.participants.filter(p=>!q||p.employee_no.toLowerCase().includes(q)||p.name.toLowerCase().includes(q));$('#participantCount').textContent=rows.length;
-  $('#participantList').innerHTML=rows.length?rows.map(p=>`<div class="participant-row"><b>${escapeHtml(p.employee_no)}</b><span>${escapeHtml(p.name)}</span><span class="credits">${Number(p.credits||0).toLocaleString()} C</span><div class="participant-actions"><button class="outline small" data-credit="${p.id}" type="button">+100 C</button><button class="outline small danger" data-delete-person="${p.id}" type="button">삭제</button></div></div>`).join(''):'<div class="empty">조건에 맞는 참가자가 없습니다.</div>';
-  $$('[data-credit]').forEach(b=>b.addEventListener('click',()=>adminCredit(b.dataset.credit,100)));$$('[data-delete-person]').forEach(b=>b.addEventListener('click',()=>deleteParticipant(b.dataset.deletePerson)));
+function renderParticipants() {
+  const query = ($('#participantSearch')?.value || '').trim().toLowerCase();
+  const list = state.admin.participants.filter(person => !query || person.employee_id.toLowerCase().includes(query) || person.name.toLowerCase().includes(query));
+  $('#participantList').innerHTML = list.length ? list.map(person => `<article class="admin-row"><div><h3>${escapeHtml(person.name)} <small>(${escapeHtml(person.employee_id)})</small></h3><p>${formatNumber(person.credits)} C</p></div><div class="row-actions"><button class="secondary" type="button" data-credit="${person.id}" data-name="${escapeHtml(person.name)}">크레딧 조정</button><button class="danger" type="button" data-delete-person="${person.id}" data-name="${escapeHtml(person.name)}">삭제</button></div></article>`).join('') : '<div class="empty-state">검색 결과가 없습니다.</div>';
 }
-$('#participantSearch').addEventListener('input',renderParticipants);$('#resetSearch').addEventListener('click',()=>{$('#participantSearch').value='';renderParticipants();$('#participantSearch').focus();});
-$('#participantForm').addEventListener('submit',async e=>{e.preventDefault();const b=$('button[type=submit]',e.currentTarget);setBusy(b,true,'등록 중');try{await api('/admin/participants',{method:'POST',token:state.adminToken,body:Object.fromEntries(new FormData(e.currentTarget))});e.currentTarget.reset();await loadAdminData();toast('참가자를 등록했습니다.','success');}catch(error){toast(error.message,'error');}finally{setBusy(b,false);}});
-$('#bulkForm').addEventListener('submit',async e=>{e.preventDefault();const b=$('button[type=submit]',e.currentTarget),text=new FormData(e.currentTarget).get('rows');const rows=text.split(/\r?\n/).filter(Boolean).map(line=>{const [employeeNo,name,password='1234',credits='0']=line.split(/\t|,/).map(v=>v.trim());return{employeeNo,name,password,credits:Number(credits)||0};});setBusy(b,true,'등록 중');try{const r=await api('/admin/participants/bulk',{method:'POST',token:state.adminToken,body:{rows}});e.currentTarget.reset();await loadAdminData();toast(`${r.created}명을 등록했습니다.`,'success');}catch(error){toast(error.message,'error');}finally{setBusy(b,false);}});
-async function adminCredit(id,amount){try{await api(`/admin/participants/${encodeURIComponent(id)}/credit`,{method:'POST',token:state.adminToken,body:{amount,description:'관리자 크레딧 지급'}});await loadAdminData();toast(`${amount} C를 지급했습니다.`,'success');}catch(error){toast(error.message,'error');}}
-async function deleteParticipant(id){const p=state.participants.find(x=>x.id===id);if(!confirm(`${p?.name||'참가자'}와 연결된 내역을 모두 삭제할까요?`))return;try{await api(`/admin/participants/${encodeURIComponent(id)}`,{method:'DELETE',token:state.adminToken});await loadAdminData();toast('참가자를 삭제했습니다.','success');}catch(error){toast(error.message,'error');}}
 
-$('#gameForm').addEventListener('submit',async e=>{e.preventDefault();const b=$('button[type=submit]',e.currentTarget);setBusy(b,true,'추가 중');try{await api('/admin/games',{method:'POST',token:state.adminToken,body:Object.fromEntries(new FormData(e.currentTarget))});e.currentTarget.reset();await loadAdminData();toast('게임을 추가했습니다.','success');}catch(error){toast(error.message,'error');}finally{setBusy(b,false);}});
-function renderAdminGames(){
-  $('#adminGameList').innerHTML=state.adminGames.length?state.adminGames.map(g=>`<article class="shop-card"><div class="image-box"><img src="${escapeHtml(g.image_url||'/assets/logo.webp')}" onerror="this.src='/assets/logo.webp'" alt="${escapeHtml(g.name)}"></div><div class="shop-card-body"><h3>${escapeHtml(g.name)}</h3><p>코드 ${escapeHtml(g.code)} · 보상 ${Number(g.reward||0)} C</p><div class="admin-card-actions"><button class="primary" data-game-qr="${escapeHtml(g.code)}" type="button">완료 QR</button><button class="outline danger" data-delete-game="${escapeHtml(g.code)}" type="button">게임 삭제</button></div></div></article>`).join(''):'<div class="empty">등록된 게임이 없습니다.</div>';
-  $$('[data-game-qr]').forEach(b=>b.addEventListener('click',()=>createGameQr(b.dataset.gameQr)));$$('[data-delete-game]').forEach(b=>b.addEventListener('click',()=>deleteGame(b.dataset.deleteGame)));
+async function userLogin(event) {
+  event.preventDefault(); const form = new FormData(event.currentTarget);
+  setLoading(true, '로그인하는 중...');
+  try {
+    const data = await api('/login', { method:'POST', body:{ employeeId:form.get('employeeId'), password:form.get('password') } });
+    saveAuth(data.token,'user'); applyUserSnapshot(data); event.currentTarget.reset(); navigate('user'); toast('ZIP! MARKET에 입장했어요.','success');
+  } catch (error) { toast(`사용자 로그인 실패: ${friendlyError(error)}`,'error'); }
+  finally { setLoading(false); }
 }
-async function createGameQr(code){try{const r=await api(`/admin/games/${encodeURIComponent(code)}/qr`,{method:'POST',token:state.adminToken});await showQr(r.token,`${r.game.name} 완료 QR · ${r.game.reward} C`);}catch(error){toast(error.message,'error');}}
-async function deleteGame(code){const g=state.adminGames.find(x=>x.code===code);if(!confirm(`${g?.name||code} 게임과 완료기록을 삭제할까요?`))return;try{await api(`/admin/games/${encodeURIComponent(code)}`,{method:'DELETE',token:state.adminToken});await loadAdminData();toast('게임을 삭제했습니다.','success');}catch(error){toast(error.message,'error');}}
-$('#paymentQrForm').addEventListener('submit',async e=>{e.preventDefault();const b=$('button[type=submit]',e.currentTarget);setBusy(b,true,'생성 중');try{const r=await api('/admin/payment-qr',{method:'POST',token:state.adminToken,body:Object.fromEntries(new FormData(e.currentTarget))});await showQr(r.token,`${r.amount} C · ${r.description}`);}catch(error){toast(error.message,'error');}finally{setBusy(b,false);}});
-async function showQr(token,caption){
-  if(!window.QRCode){toast('QR 생성 라이브러리를 불러오지 못했습니다. 새로고침해 주세요.','error');return;}
-  openModal('qrDisplayModal');$('#qrCaption').textContent=caption;const payload=new URL('/?token='+encodeURIComponent(token),location.origin).href, mount=$('#qrCanvas');mount.innerHTML='';
-  new window.QRCode(mount,{text:payload,width:420,height:420,colorDark:'#0d294d',colorLight:'#fffdf9',correctLevel:window.QRCode.CorrectLevel.M});
+async function adminLogin(event) {
+  event.preventDefault(); const password = new FormData(event.currentTarget).get('password');
+  setLoading(true, '관리자 로그인 확인 중...');
+  try {
+    const data = await api('/admin/login', { method:'POST', body:{ password } });
+    saveAuth(data.token,'admin'); applyAdminSnapshot(data); event.currentTarget.reset(); closeAllModals(); navigate('admin',true); toast('관리자 페이지를 열었습니다.','success');
+  } catch (error) { toast(`관리자 로그인 실패: ${friendlyError(error)}${error.detail ? ` (${error.detail})` : ''}`,'error'); }
+  finally { setLoading(false); }
 }
-$('#adminPasswordForm').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.currentTarget),password=fd.get('password');if(password!==fd.get('confirm')){toast('새 비밀번호가 서로 다릅니다.','error');return;}const b=$('button[type=submit]',e.currentTarget);setBusy(b,true,'변경 중');try{await api('/admin/password',{method:'POST',token:state.adminToken,body:{password}});e.currentTarget.reset();toast('관리자 비밀번호를 변경했습니다.','success');}catch(error){toast(error.message,'error');}finally{setBusy(b,false);}});
+function logout() { clearAuth(); closeAllModals(); navigate('login'); toast('로그아웃했습니다.'); }
 
-window.addEventListener('online',()=>{$('#connectionBadge').textContent='ONLINE';});window.addEventListener('offline',()=>{$('#connectionBadge').textContent='OFFLINE';});
-bootstrapHistory();render();
+function openPayment(amount) {
+  state.pendingPayment = amount;
+  $('#paymentDescription').innerHTML = `<strong>${formatNumber(amount)} C</strong>를 결제할까요?<br><small>결제 확인을 눌렀을 때만 크레딧이 차감됩니다.</small>`;
+  openModal('paymentModal');
+}
+async function confirmPayment() {
+  const amount = state.pendingPayment; if (!amount) return;
+  setLoading(true, '결제 처리 중...');
+  try { const data = await api('/pay', { method:'POST', body:{ amount } }); applyUserSnapshot(data); closeModal('paymentModal'); toast(`${formatNumber(amount)} C 결제 완료`,'success'); }
+  catch (error) { toast(friendlyError(error),'error'); }
+  finally { state.pendingPayment = 0; setLoading(false); }
+}
+
+async function stopScanner() {
+  if (!state.scanner) return;
+  try { if (state.scanning) await state.scanner.stop(); } catch {}
+  try { await state.scanner.clear(); } catch {}
+  state.scanning = false;
+}
+async function ensureScanner() {
+  const Scanner = await loadQrScanner();
+  if (!state.scanner) state.scanner = new Scanner('qrReader', { verbose:false });
+  return state.scanner;
+}
+async function startCamera() {
+  try {
+    const Scanner = await loadQrScanner();
+    await stopScanner(); state.scanner = new Scanner('qrReader', { verbose:false });
+    await state.scanner.start({ facingMode:'environment' }, { fps:10, qrbox:(w,h) => ({ width:Math.min(250,w-24), height:Math.min(250,h-24) }), aspectRatio:1 }, async text => { await stopScanner(); await redeemQr(text); }, () => {});
+    state.scanning = true;
+  } catch (error) { state.scanning = false; toast('카메라를 시작하지 못했습니다. 카메라 권한을 허용하거나 사진에서 QR 읽기를 이용해 주세요.','error'); }
+}
+async function scanFile(file) {
+  if (!file) return;
+  try { const Scanner = await loadQrScanner(); await stopScanner(); state.scanner = new Scanner('qrReader', { verbose:false }); const text = await state.scanner.scanFile(file, true); await redeemQr(text); }
+  catch (error) { toast('사진에서 QR을 찾지 못했습니다. QR이 선명하게 보이는 사진을 사용해 주세요.','error'); }
+}
+async function redeemQr(qrPayload) {
+  setLoading(true, 'QR 처리 중...');
+  try { const data = await api('/redeem', { method:'POST', body:{ qrPayload } }); applyUserSnapshot(data); closeModal('qrModal'); toast('QR 처리가 완료됐어요.','success'); }
+  catch (error) { toast(friendlyError(error),'error'); }
+  finally { setLoading(false); }
+}
+
+async function submitParticipant(event) {
+  event.preventDefault(); const form = new FormData(event.currentTarget);
+  setLoading(true,'참가자 등록 중...');
+  try { const data = await api('/admin/participants',{method:'POST',body:{employeeId:form.get('employeeId'),name:form.get('name'),password:form.get('password'),credits:Number(form.get('credits'))}}); applyAdminSnapshot(data); event.currentTarget.reset(); toast('참가자를 등록했습니다.','success'); }
+  catch(error){ toast(friendlyError(error),'error'); } finally{ setLoading(false); }
+}
+async function bulkAdd() {
+  const lines = $('#bulkParticipants').value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const participants = lines.map(line => { const parts=line.split(/\t|,/).map(v=>v.trim()); return {employeeId:parts[0],name:parts[1],password:parts[2],credits:Number(parts[3]||0)}; });
+  if (!participants.length || participants.some(p=>!p.employeeId||!p.name||!p.password||!Number.isFinite(p.credits))) return toast('일괄 등록 형식을 확인해 주세요.','error');
+  setLoading(true,'참가자 일괄 등록 중...');
+  try { const data=await api('/admin/participants',{method:'POST',body:{participants}}); applyAdminSnapshot(data); $('#bulkParticipants').value=''; toast(`${participants.length}명을 등록했습니다.`,'success'); }
+  catch(error){ toast(friendlyError(error),'error'); } finally{ setLoading(false); }
+}
+async function submitGame(event) {
+  event.preventDefault(); const form=new FormData(event.currentTarget); setLoading(true,'게임 추가 중...');
+  try { const data=await api('/admin/games',{method:'POST',body:{name:form.get('name'),imageUrl:form.get('imageUrl'),reward:Number(form.get('reward'))}}); applyAdminSnapshot(data); event.currentTarget.reset(); toast('게임을 추가했습니다.','success'); }
+  catch(error){ toast(friendlyError(error),'error'); } finally{ setLoading(false); }
+}
+async function showQr(path, body, title) {
+  setLoading(true,'QR 생성 중...');
+  try { const Generator=await loadQrGenerator(); const data=await api(path,{method:'POST',body}); await Generator.toCanvas($('#generatedQrCanvas'),data.qrPayload,{width:340,margin:2,color:{dark:'#0b2648',light:'#ffffff'},errorCorrectionLevel:'M'}); $('#generatedQrTitle').textContent=title; $('#generatedQrCaption').textContent=data.caption; openModal('generatedQrModal'); }
+  catch(error){ toast(friendlyError(error),'error'); } finally{ setLoading(false); }
+}
+async function submitPaymentQr(event){event.preventDefault();const amount=Number(new FormData(event.currentTarget).get('amount'));await showQr('/admin/payment-qr',{amount},'결제 QR');}
+async function changeAdminPassword(event){event.preventDefault();const password=new FormData(event.currentTarget).get('password');setLoading(true,'비밀번호 변경 중...');try{await api('/admin/password',{method:'POST',body:{password}});event.currentTarget.reset();toast('관리자 비밀번호를 변경했습니다.','success');}catch(error){toast(friendlyError(error),'error');}finally{setLoading(false);}}
+
+$('#loginForm').addEventListener('submit',userLogin);
+$('#adminLoginForm').addEventListener('submit',adminLogin);
+$('#openAdminLogin').addEventListener('click',()=>openModal('adminLoginModal'));
+$('#confirmPayment').addEventListener('click',confirmPayment);
+$('#openQrScanner').addEventListener('click',()=>openModal('qrModal'));
+$('#startCamera').addEventListener('click',startCamera);
+$('#qrFile').addEventListener('change',event=>scanFile(event.target.files?.[0]));
+$('#toggleHistory').addEventListener('click',()=>{state.showAllHistory=!state.showAllHistory;renderHistory();});
+$('#participantForm').addEventListener('submit',submitParticipant);
+$('#bulkAddButton').addEventListener('click',bulkAdd);
+$('#gameForm').addEventListener('submit',submitGame);
+$('#paymentQrForm').addEventListener('submit',submitPaymentQr);
+$('#adminPasswordForm').addEventListener('submit',changeAdminPassword);
+$('#participantSearch').addEventListener('input',renderParticipants);
+$('#resetSearch').addEventListener('click',()=>{$('#participantSearch').value='';renderParticipants();$('#participantSearch').focus();});
+
+document.addEventListener('click',async event=>{
+  const target=event.target.closest('button,[data-close-modal]'); if(!target)return;
+  if(target.dataset.closeModal){closeModal(target.dataset.closeModal);return;}
+  if(target.dataset.action==='logout'){logout();return;}
+  if(target.dataset.pay){openPayment(Number(target.dataset.pay));return;}
+  if(target.dataset.openScan){openModal('qrModal');return;}
+  if(target.dataset.deletePerson){if(!confirm(`${target.dataset.name} 참가자를 삭제할까요? 사용내역도 함께 삭제됩니다.`))return;setLoading(true,'참가자 삭제 중...');try{await api(`/admin/participants/${target.dataset.deletePerson}`,{method:'DELETE'});state.admin.participants=state.admin.participants.filter(p=>p.id!==target.dataset.deletePerson);renderParticipants();toast('참가자를 삭제했습니다.','success');}catch(error){toast(friendlyError(error),'error');}finally{setLoading(false);}return;}
+  if(target.dataset.credit){const amount=Number(prompt(`${target.dataset.name}님의 크레딧 조정 금액을 입력하세요. 지급은 양수, 차감은 음수입니다.`,`100`));if(!Number.isSafeInteger(amount)||amount===0)return;setLoading(true,'크레딧 조정 중...');try{const data=await api(`/admin/participants/${target.dataset.credit}/credit`,{method:'POST',body:{amount}});applyAdminSnapshot(data);toast('크레딧을 조정했습니다.','success');}catch(error){toast(friendlyError(error),'error');}finally{setLoading(false);}return;}
+  if(target.dataset.deleteGame){if(!confirm(`${target.dataset.name} 게임과 연결된 완료 기록을 삭제할까요?`))return;setLoading(true,'게임 삭제 중...');try{await api(`/admin/games/${target.dataset.deleteGame}`,{method:'DELETE'});state.admin.games=state.admin.games.filter(g=>g.id!==target.dataset.deleteGame);renderAdmin();toast('게임을 삭제했습니다.','success');}catch(error){toast(friendlyError(error),'error');}finally{setLoading(false);}return;}
+  if(target.dataset.gameQr){await showQr(`/admin/games/${target.dataset.gameQr}/qr`,{},'게임 완료 QR');}
+});
+
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){const modal=$$('.modal').find(item=>!item.hidden);if(modal)closeModal(modal.id);}});
+
+async function restoreSession(){
+  history.replaceState({view:'login'},'',location.pathname);
+  if(!state.token||!state.role){showView('login');return;}
+  setLoading(true,'이전 로그인 복원 중...');
+  try{
+    if(state.role==='user'){const data=await api('/session');applyUserSnapshot(data);navigate('user',true);}
+    else if(state.role==='admin'){const data=await api('/admin/snapshot');applyAdminSnapshot(data);navigate('admin',true);}
+    else throw new Error('role');
+  }catch{clearAuth();navigate('login',true);}finally{setLoading(false);}
+}
+
+restoreSession();
