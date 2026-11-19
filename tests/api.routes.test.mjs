@@ -8,6 +8,7 @@ process.env.INITIAL_ADMIN_PASSWORD='admin1234';
 const participantId='11111111-1111-1111-1111-111111111111';
 const gameId='22222222-2222-2222-2222-222222222222';
 const calls=[];
+let participantAuth = new Map([['TEST001','1234']]);
 const jsonResponse=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}});
 globalThis.fetch=async(url,options={})=>{
   const body=options.body?JSON.parse(options.body):null;
@@ -16,13 +17,20 @@ globalThis.fetch=async(url,options={})=>{
   if(u.endsWith('/rpc/zip_market_initialize_admin')) return jsonResponse({initialized:true,createdNow:false});
   if(u.endsWith('/rpc/zip_market_auth_admin')) return jsonResponse({authenticated:body.p_password==='admin1234'});
   if(u.endsWith('/rpc/zip_market_auth_participant')) {
-    if(body.p_employee_no==='TEST001'&&body.p_password==='1234') return jsonResponse({authenticated:true,participant:{id:participantId,employee_no:'TEST001',name:'테스트',credit_balance:1000}});
+    if(participantAuth.get(body.p_employee_no)===body.p_password) return jsonResponse({authenticated:true,participant:{id:participantId,employee_no:body.p_employee_no,name:'테스트',credit_balance:1000}});
     return jsonResponse({authenticated:false});
   }
   if(u.endsWith('/rpc/zip_market_pay_credit')) return jsonResponse({ok:true,balance:900});
   if(u.endsWith('/rpc/zip_market_complete_game')) return jsonResponse({ok:true,gameId,reward:100,balance:1100});
   if(u.endsWith('/rpc/zip_market_grant_credit')) return jsonResponse({ok:true,balance:1100});
-  if(u.endsWith('/rpc/zip_market_admin_create_participant')) return jsonResponse({id:participantId,employee_no:body.p_employee_no,name:body.p_name,credit_balance:body.p_initial_credit});
+  if(u.endsWith('/rpc/zip_market_admin_create_participant')) { if(participantAuth.has(body.p_employee_no)) return jsonResponse({code:'23505',message:'EMPLOYEE_NO_ALREADY_EXISTS'},409); participantAuth.set(body.p_employee_no,body.p_password); return jsonResponse({id:participantId,employee_no:body.p_employee_no,name:body.p_name,credit_balance:body.p_initial_credit}); }
+  if(u.endsWith('/rpc/zip_market_admin_create_participants')) {
+    const rows=body.p_participants;
+    const duplicate=rows.find((row,index)=>participantAuth.has(row.employeeNo)||rows.findIndex(candidate=>candidate.employeeNo===row.employeeNo)!==index);
+    if(duplicate)return jsonResponse({code:'23505',message:`ROW_1: EMPLOYEE_NO_ALREADY_EXISTS (${duplicate.employeeNo})`},409);
+    rows.forEach(row=>participantAuth.set(row.employeeNo,row.password));
+    return jsonResponse({createdCount:rows.length,results:rows.map((row,index)=>({row:index+1,employeeNo:row.employeeNo,participant:{employee_no:row.employeeNo}}))});
+  }
   if(u.endsWith('/rpc/zip_market_set_admin_password')) return jsonResponse({updated:true});
   if((options.method||'GET')==='DELETE') return new Response(null,{status:204});
   if((options.method||'GET')==='POST'&&u.includes('/games?')) return jsonResponse([{id:gameId,name:body.name,image_url:body.image_url}],201);
@@ -43,7 +51,7 @@ const request=(path,method='GET',body,token,direct=false)=>new Request(
 for (const direct of [false,true]) {
   const res=await handler(request('/health','GET',undefined,undefined,direct));
   assert.ok(res instanceof Response);assert.equal(res.status,200);
-  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.4');assert.equal(body.version,'8.4.0');
+  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.5');assert.equal(body.version,'8.5.0');
 }
 assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_initialize_admin')).body,{p_initial_password:'admin1234'});
 
@@ -74,6 +82,31 @@ assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_complete_game')).
 // Admin create/grant/password and both deletion routes.
 const createParticipant=await handler(request('/admin/participants','POST',{employeeNo:'NEW001',name:'신규',password:'1234',initialCredit:500},adminBody.token));
 assert.equal(createParticipant.status,201);
+const newLogin=await handler(request('/auth/participant','POST',{employeeNo:'NEW001',password:'1234'}));
+assert.equal(newLogin.status,200,'newly registered participant must be able to log in');
+const duplicateParticipant=await handler(request('/admin/participants','POST',{employeeNo:'NEW001',name:'중복',password:'1234',initialCredit:0},adminBody.token));
+assert.equal(duplicateParticipant.status,409);assert.equal((await duplicateParticipant.json()).code,'EMPLOYEE_NO_ALREADY_EXISTS');
+const invalidSingle=await handler(request('/admin/participants','POST',{employeeNo:'BAD001',name:'잘못',password:'1234',initialCredit:-1},adminBody.token));
+assert.equal(invalidSingle.status,400);assert.equal((await invalidSingle.json()).code,'INVALID_INITIAL_CREDIT');
+const bulk=await handler(request('/admin/participants/bulk','POST',{participants:[
+  {employeeNo:'BULK001',name:'일괄1',password:'1111',initialCredit:1000},
+  {employeeNo:'BULK002',name:'일괄2',password:'2222',initialCredit:2000}
+]},adminBody.token));
+assert.equal(bulk.status,201);assert.equal((await bulk.json()).createdCount,2);
+const bulkRpc=calls.find(c=>c.url.endsWith('/rpc/zip_market_admin_create_participants'));
+assert.equal(bulkRpc.body.p_participants.length,2);
+const beforeInvalidCalls=calls.filter(c=>c.url.endsWith('/rpc/zip_market_admin_create_participants')).length;
+const invalidBulk=await handler(request('/admin/participants/bulk','POST',{participants:[
+  {employeeNo:'OKROW',name:'정상',password:'1111',initialCredit:100},
+  {employeeNo:'BADROW',name:'',password:'2222',initialCredit:100}
+]},adminBody.token));
+assert.equal(invalidBulk.status,400);assert.match((await invalidBulk.json()).message,/2행/);
+assert.equal(calls.filter(c=>c.url.endsWith('/rpc/zip_market_admin_create_participants')).length,beforeInvalidCalls,'invalid bulk must not call database');
+const duplicateBulk=await handler(request('/admin/participants/bulk','POST',{participants:[
+  {employeeNo:'DUPROW',name:'첫째',password:'1111',initialCredit:100},
+  {employeeNo:'DUPROW',name:'둘째',password:'2222',initialCredit:100}
+]},adminBody.token));
+assert.equal(duplicateBulk.status,409);assert.equal((await duplicateBulk.json()).code,'DUPLICATE_EMPLOYEE_NO_IN_FILE');
 const grant=await handler(request(`/admin/participants/${participantId}/credit`,'POST',{amount:100},adminBody.token));
 assert.equal(grant.status,200);
 const password=await handler(request('/admin/password','POST',{password:'next1234'},adminBody.token));

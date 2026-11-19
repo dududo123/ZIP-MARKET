@@ -1,125 +1,150 @@
-# ZIP! MARKET v8.4.0 — Supabase RPC contract repair
+# ZIP! MARKET v8.5.0 — participant registration compatibility repair
 
-This is a complete deployable project for the current `SCHEMA_MISSING` failure. It preserves the v8.3 UI and all six supplied images, while replacing the database contract with one exact, test-parsed contract shared by the Netlify API and Supabase.
+This complete project fixes both administrator registration paths against the existing production database:
 
-## Confirmed cause
+- Single participant registration
+- Excel/bulk participant registration
 
-The deployed Function calls these PostgREST RPCs:
+It preserves the v8.4 UI, authentication, credits, payments, games, QR, deletion, navigation, fonts, responsive images, and all six supplied images.
 
-- `public.zip_market_initialize_admin(p_initial_password text)`
-- `public.zip_market_auth_admin(p_initial_password text, p_password text)`
-- `public.zip_market_auth_participant(p_employee_no text, p_password text)`
+## Confirmed failures and causes
 
-They are missing from PostgREST's schema cache. The prior migration history also contained a subtle PostgreSQL incompatibility: an older administrator function used the same SQL type signature `(text, text)` but the input names were ordered as `p_password, p_initial_password`. PostgreSQL cannot change input parameter names with `CREATE OR REPLACE FUNCTION`; it requires the old function to be dropped first. If that error occurs while a multi-statement migration is executed, later functions and the cache refresh are never installed.
+### Database failure
 
-v8.4 explicitly drops only the old ZIP! MARKET function overloads—never tables or rows—then recreates all eight canonical RPCs with exact parameter names, JSONB return shapes, privileges, and PostgREST cache notifications.
-
-## Safe repair order
-
-### 1. Repair Supabase first
-
-In Supabase:
-
-1. Open **SQL Editor → New query**.
-2. Open `supabase/schema-repair.sql` from this project.
-3. Copy the entire file into the new query.
-4. Press **Run** once.
-
-Do not paste it over an old saved query and do not run only a selected section.
-
-The repair SQL:
-
-- does not drop tables;
-- does not delete or truncate rows;
-- preserves participants, credits, games, transactions, completions, and settings;
-- migrates and synchronizes both legacy column sets (`employee_no`/`credit_balance` and `employee_id`/`credits`);
-- removes only incompatible ZIP! MARKET functions before recreating them;
-- grants execution only to `service_role`;
-- revokes direct RPC execution from `public`, `anon`, and `authenticated`;
-- validates all eight function signatures, JSONB returns, and privileges;
-- sends both `NOTIFY pgrst, 'reload schema'` and `NOTIFY pgrst, 'reload config'`.
-
-At the end, the SQL result must contain:
-
-- `schema_version = 8.4.0`;
-- eight `zip_market_*` rows;
-- `returns = jsonb` for every row;
-- `service_role_execute = true`;
-- `anon_execute = false`;
-- `authenticated_execute = false`.
-
-If the SQL Editor reports an error, do not deploy until that error is resolved. The final verification block deliberately fails instead of reporting a false success.
-
-### 2. Check the already-deployed API
-
-Open:
+The production `transactions` table contains an older required column:
 
 ```text
-https://YOUR-SITE.netlify.app/api/health
+kind NOT NULL
 ```
 
-Once the SQL is installed and PostgREST has refreshed, it must no longer return `SCHEMA_MISSING`.
+The v8.4 participant-creation RPC inserted only the newer columns (`type`, `description`, `balance_after`, and `reference`). A registration with 10,000 initial credits therefore attempted to create a transaction where `kind` was null, and PostgreSQL rolled back the participant creation.
 
-### 3. Deploy the complete v8.4 project
+v8.5 repairs and synchronizes these compatibility fields:
 
-1. Replace the GitHub repository contents with this complete project.
-2. Keep `.env.example`; never upload a real `.env` file.
-3. Keep these Netlify environment variables:
+- `kind`
+- `type`
+- `label`
+- `description`
+- `balance_after`
+- `reference`
+- `created_at`
+
+Every initial-credit, administrator grant, payment, and game-reward insert now supplies all of them explicitly. A database trigger also normalizes future/legacy inserts.
+
+### Frontend failure
+
+The old asynchronous handlers called:
+
+```js
+e.currentTarget.reset()
+```
+
+after one or more `await` operations. At that point the event's `currentTarget` can be null, producing:
+
+```text
+Cannot read properties of null (reading 'reset')
+```
+
+v8.5 captures the form element before awaiting, confirms that it is an `HTMLFormElement`, and uses `resetFormSafely()` on the correct form:
+
+- Single registration resets `#participant-create-form` and focuses `employeeNo`.
+- Bulk registration resets `#participant-bulk-form` and focuses its textarea.
+
+## Safe application order
+
+### 1. Run the Supabase repair first
+
+1. Open **Supabase → SQL Editor → New query**.
+2. Open `supabase/schema-repair.sql` from this project.
+3. Copy the entire file into the new query.
+4. Ensure no partial text is selected.
+5. Press **Run** once.
+
+The SQL is data-preserving:
+
+- no `DROP TABLE`;
+- no `DELETE FROM`;
+- no `TRUNCATE`;
+- no participant, transaction, game, completion, or setting rows removed.
+
+It backfills missing compatibility values before applying NOT NULL guarantees, recreates the registration RPCs, grants only `service_role`, verifies the catalog, and refreshes PostgREST.
+
+### 2. Deploy the complete project
+
+1. Replace the GitHub repository with the complete v8.5 project.
+2. Keep `.env.example`; never upload a real `.env`.
+3. Preserve the four Netlify variables:
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `JWT_SECRET`
    - `INITIAL_ADMIN_PASSWORD`
-4. In Netlify, run **Clear cache and deploy site** once.
-5. Recheck `/api/health`.
+4. Use **Clear cache and deploy site** once.
+5. Check `/api/health`, administrator login, single registration, Excel registration, and participant login.
 
-Expected core response:
+Expected health version:
 
 ```json
 {
   "ok": true,
   "database": true,
-  "adminInitialized": true,
-  "runtime": "netlify-modern-response",
-  "schema": "zip-market-v8.4",
-  "version": "8.4.0"
+  "schema": "zip-market-v8.5",
+  "version": "8.5.0"
 }
 ```
 
-Then test administrator login and one existing participant login.
+## Registration behavior
 
-## Exact RPC contract
+### Single registration
 
-| Function | Exact parameters | Return |
-|---|---|---|
-| `zip_market_initialize_admin` | `p_initial_password text` | `jsonb` |
-| `zip_market_auth_admin` | `p_initial_password text, p_password text` | `jsonb` |
-| `zip_market_auth_participant` | `p_employee_no text, p_password text` | `jsonb` |
-| `zip_market_admin_create_participant` | `p_employee_no text, p_name text, p_password text, p_initial_credit integer` | `jsonb` |
-| `zip_market_set_admin_password` | `p_password text` | `jsonb` |
-| `zip_market_grant_credit` | `p_participant_id uuid, p_amount integer, p_description text` | `jsonb` |
-| `zip_market_pay_credit` | `p_participant_id uuid, p_amount integer, p_description text` | `jsonb` |
-| `zip_market_complete_game` | `p_participant_id uuid, p_game_id uuid` | `jsonb` |
+- Validates required employee number, name, password, and nonnegative integer credit.
+- Creates participant and initial-credit transaction atomically.
+- Converts duplicate employee numbers to a clear `EMPLOYEE_NO_ALREADY_EXISTS` message.
+- A newly registered participant can log in using the supplied password.
 
-## Preserved UI and features
+### Excel registration
 
-- Existing login, participant, and administrator UI
-- Jua headings and Pretendard body font
-- Supplied logo, 100/200/300 payment images, and two game images
-- Participant registration, Excel paste, search/reset, credit grant, and deletion
-- Credit payment and transaction history
-- Recent five transactions plus expansion
-- Payment QR and game-completion QR
-- iPhone camera and QR-image scanning
-- Game creation, reward, completion, and deletion
-- Modal X/ESC/outside/back behavior
-- Mobile and desktop internal history navigation
-- Responsive `object-fit: contain` images and 390px iPhone layout
+Expected columns per non-empty row:
 
-## Verification commands
+```text
+employee number<TAB>name<TAB>password<TAB>initial credit
+```
+
+The browser reports row-specific errors for:
+
+- missing columns;
+- missing employee number, name, or password;
+- noninteger or negative credit;
+- duplicate employee number within the pasted data.
+
+The server sends all valid rows to one database RPC. The RPC performs two passes:
+
+1. Validate every row and every duplicate before writing.
+2. Create all rows in one PostgreSQL transaction.
+
+If any validation, existing-employee, race, or transaction error occurs, the entire RPC is rolled back. It cannot leave earlier Excel rows registered while later rows fail.
+
+## Exact registration RPCs
+
+```text
+zip_market_admin_create_participant(
+  p_employee_no text,
+  p_name text,
+  p_password text,
+  p_initial_credit integer
+) returns jsonb
+
+zip_market_admin_create_participants(
+  p_participants jsonb
+) returns jsonb
+```
+
+## Verification
+
+Run:
 
 ```bash
 npm test
 npm run check
 ```
 
-The test suite parses API RPC calls and SQL function signatures rather than checking names by simple substring alone. It verifies parameter names, types and order, JSONB returns, grants/revokes, PostgREST refresh, SQL structure, `/api/health`, direct Function routing, administrator and participant login success/failure, payment, games, CRUD/deletion order, QR, history, transactions, fonts, responsive images, DOM references, and response-envelope compatibility.
+The suite covers SQL/API signatures and privileges, old/new transaction schemas including required `kind`, single registration, atomic Excel success and rollback cases, duplicate employee numbers, participant login after registration, executable form reset and Excel parser tests, API routes, administrator login, payment, games, deletion, QR, history, transaction display, fonts, responsive images, static resources, and JavaScript syntax.

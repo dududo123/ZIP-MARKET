@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const VERSION = '8.4.0';
+  const VERSION = '8.5.0';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const views = { login: $('#login-view'), participant: $('#participant-view'), admin: $('#admin-view') };
@@ -21,6 +21,34 @@
   function setBusy(button, busy, label = '처리 중…') {
     if (!button) return; if (busy) { button.dataset.oldText = button.textContent; button.textContent = label; button.disabled = true; }
     else { button.textContent = button.dataset.oldText || button.textContent; button.disabled = false; }
+  }
+  function resetFormSafely(form, focusSelector) {
+    if (!(form instanceof HTMLFormElement)) return false;
+    form.reset();
+    if (focusSelector) form.querySelector(focusSelector)?.focus();
+    return true;
+  }
+  function parseBulkParticipants(text) {
+    const lines = String(text || '').split(/\r?\n/);
+    const participants = [];
+    const errors = [];
+    const seen = new Map();
+    lines.forEach((raw, index) => {
+      if (!raw.trim()) return;
+      const row = index + 1;
+      const columns = raw.includes('\t') ? raw.split('\t') : raw.split(/\s{2,}|,/);
+      const [employeeNoRaw='', nameRaw='', passwordRaw='', creditRaw=''] = columns.map(value => String(value).trim());
+      const employeeNo = employeeNoRaw, name = nameRaw, password = passwordRaw;
+      if (columns.length < 4) errors.push(`${row}행: 사번·이름·비밀번호·크레딧 4개 열이 필요합니다.`);
+      else if (!employeeNo) errors.push(`${row}행: 사번이 없습니다.`);
+      else if (!name) errors.push(`${row}행: 이름이 없습니다.`);
+      else if (!password) errors.push(`${row}행: 비밀번호가 없습니다.`);
+      else if (!/^(0|[1-9]\d*)$/.test(creditRaw)) errors.push(`${row}행: 초기 크레딧은 0 이상의 정수여야 합니다.`);
+      else if (seen.has(employeeNo)) errors.push(`${row}행: ${seen.get(employeeNo)}행과 사번이 중복됩니다. (${employeeNo})`);
+      else { seen.set(employeeNo,row); participants.push({employeeNo,name,password,initialCredit:Number(creditRaw)}); }
+    });
+    if (!participants.length && !errors.length) errors.push('등록할 데이터를 붙여넣어 주세요.');
+    return { participants, errors };
   }
   function escapeHtml(value) { return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
   function formatDate(value) { try { return new Intl.DateTimeFormat('ko-KR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(value)); } catch { return ''; } }
@@ -180,8 +208,34 @@
   $('#open-scanner').addEventListener('click',()=>openModal('scanner-modal'));$('#camera-start').addEventListener('click',startScanner);$('#qr-file').addEventListener('change',e=>{if(e.target.files?.[0])scanFile(e.target.files[0]);e.target.value='';});
   $$('[data-admin-tab]').forEach(b=>b.addEventListener('click',()=>switchAdminTab(b.dataset.adminTab)));
 
-  $('#participant-create-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('button[type=submit]',e.currentTarget),form=new FormData(e.currentTarget);setBusy(button,true);try{await api('/admin/participants',{method:'POST',body:{employeeNo:form.get('employeeNo'),name:form.get('name'),password:form.get('password'),initialCredit:Number(form.get('initialCredit')||0)}});e.currentTarget.reset();await loadAdmin();toast('참가자를 등록했습니다.');}catch(error){toast(errorMessage(error),true);}finally{setBusy(button,false);}});
-  $('#participant-bulk-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('button[type=submit]',e.currentTarget),form=new FormData(e.currentTarget);const participants=String(form.get('bulk')||'').split(/\r?\n/).filter(Boolean).map(line=>{const [employeeNo,name,password,initialCredit='0']=line.trim().split(/\t|\s{2,}|,/);return{employeeNo,name,password,initialCredit:Number(initialCredit||0)}});if(!participants.length){toast('등록할 데이터를 붙여넣어 주세요.',true);return;}setBusy(button,true);try{const result=await api('/admin/participants/bulk',{method:'POST',body:{participants}});const failed=result.results.filter(x=>!x.ok);await loadAdmin();e.currentTarget.reset();toast(failed.length?`${participants.length-failed.length}명 등록, ${failed.length}명 실패`:`${participants.length}명을 등록했습니다.`,Boolean(failed.length));}catch(error){toast(errorMessage(error),true);}finally{setBusy(button,false);}});
+  $('#participant-create-form')?.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const formElement=event.currentTarget;
+    if(!(formElement instanceof HTMLFormElement)){toast('참가자 등록 폼을 찾을 수 없습니다. 새로고침해 주세요.',true);return;}
+    const button=$('button[type=submit]',formElement),form=new FormData(formElement);
+    setBusy(button,true);
+    try{
+      await api('/admin/participants',{method:'POST',body:{employeeNo:String(form.get('employeeNo')||'').trim(),name:String(form.get('name')||'').trim(),password:String(form.get('password')||''),initialCredit:Number(form.get('initialCredit')||0)}});
+      resetFormSafely(formElement,'[name="employeeNo"]');
+      await loadAdmin();
+      toast('참가자를 등록했습니다.');
+    }catch(error){toast(errorMessage(error),true);}finally{setBusy(button,false);}
+  });
+  $('#participant-bulk-form')?.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const formElement=event.currentTarget;
+    if(!(formElement instanceof HTMLFormElement)){toast('Excel 등록 폼을 찾을 수 없습니다. 새로고침해 주세요.',true);return;}
+    const button=$('button[type=submit]',formElement),form=new FormData(formElement);
+    const {participants,errors}=parseBulkParticipants(form.get('bulk'));
+    if(errors.length){toast(errors.slice(0,3).join(' / '),true);return;}
+    setBusy(button,true);
+    try{
+      const result=await api('/admin/participants/bulk',{method:'POST',body:{participants}});
+      resetFormSafely(formElement,'textarea[name="bulk"]');
+      await loadAdmin();
+      toast(`${Number(result.createdCount||participants.length)}명을 모두 등록했습니다.`);
+    }catch(error){toast(errorMessage(error),true);}finally{setBusy(button,false);}
+  });
   $('#participant-search-button').addEventListener('click',()=>loadAdmin($('#participant-search').value.trim()).catch(e=>toast(errorMessage(e),true)));$('#participant-search').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('#participant-search-button').click();}});$('#participant-search-reset').addEventListener('click',()=>{$('#participant-search').value='';loadAdmin().catch(e=>toast(errorMessage(e),true));});
   $('#admin-participants').addEventListener('click',async e=>{const grant=e.target.closest('.grant-credit'),del=e.target.closest('.delete-participant');try{if(grant){setBusy(grant,true);await api(`/admin/participants/${grant.dataset.id}/credit`,{method:'POST',body:{amount:100}});await loadAdmin();toast('100 C를 지급했습니다.');}if(del&&confirm(`${del.dataset.name} 참가자와 관련 내역을 모두 삭제할까요?`)){setBusy(del,true,'삭제 중…');await api(`/admin/participants/${del.dataset.id}`,{method:'DELETE'});await loadAdmin();toast('참가자를 삭제했습니다.');}}catch(error){toast(errorMessage(error),true);if(grant)setBusy(grant,false);if(del)setBusy(del,false);}});
   $('#payment-qr-form').addEventListener('submit',e=>{e.preventDefault();const form=new FormData(e.currentTarget),amount=Number(form.get('amount')),description=String(form.get('description')||`${amount}C 결제`);showQr({app:'zip-market',v:1,type:'payment',amount,description},`${amount} C 결제 QR`,description);});

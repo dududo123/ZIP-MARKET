@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-const VERSION = '8.4.0';
+const VERSION = '8.5.0';
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -17,6 +17,29 @@ class ApiError extends Error {
     this.detail = detail;
   }
 }
+
+const friendlyDatabaseError = (error) => {
+  const detail = String(error?.detail || error?.message || '');
+  const rowMatch = detail.match(/ROW_(\d+):\s*([A-Z_]+)(?:\s*\(([^)]+)\))?/i);
+  const labels = {
+    EMPLOYEE_NO_REQUIRED: '사번이 없습니다.',
+    NAME_REQUIRED: '이름이 없습니다.',
+    PASSWORD_REQUIRED: '비밀번호가 없습니다.',
+    INVALID_INITIAL_CREDIT: '초기 크레딧은 0 이상의 정수여야 합니다.',
+    DUPLICATE_EMPLOYEE_NO_IN_FILE: 'Excel 내용에 같은 사번이 중복되어 있습니다.',
+    EMPLOYEE_NO_ALREADY_EXISTS: '이미 등록된 사번입니다.'
+  };
+  if (rowMatch) {
+    const row = Number(rowMatch[1]);
+    const code = rowMatch[2].toUpperCase();
+    const employeeNo = rowMatch[3] ? ` (${rowMatch[3]})` : '';
+    return new ApiError(code.includes('DUPLICATE') || code.includes('ALREADY_EXISTS') ? 409 : 400, code, `${row}행: ${labels[code] || code}${employeeNo}`, detail);
+  }
+  if (/EMPLOYEE_NO_ALREADY_EXISTS|duplicate key|participants_employee/i.test(detail)) {
+    return new ApiError(409, 'EMPLOYEE_NO_ALREADY_EXISTS', '이미 등록된 사번입니다.', detail);
+  }
+  return error;
+};
 
 const env = () => ({
   supabaseUrl: (process.env.SUPABASE_URL || '').replace(/\/$/, ''),
@@ -124,7 +147,7 @@ async function health() {
     adminCreatedNow: Boolean(initialized?.createdNow),
     transport: 'direct-rest',
     runtime: 'netlify-modern-response',
-    schema: 'zip-market-v8.4',
+    schema: 'zip-market-v8.5',
     version: VERSION
   };
 }
@@ -204,30 +227,55 @@ async function route(request) {
   }
 
   if (method === 'POST' && path === '/admin/participants') {
-    const person = await rpc('zip_market_admin_create_participant', {
-      p_employee_no: String(body.employeeNo || ''),
-      p_name: String(body.name || ''),
-      p_password: String(body.password || ''),
-      p_initial_credit: Number(body.initialCredit || 0)
-    });
-    return response(201, { ok: true, participant: person });
+    const employeeNo = String(body.employeeNo || '').trim();
+    const name = String(body.name || '').trim();
+    const password = String(body.password || '');
+    const initialCreditText = String(body.initialCredit ?? '').trim();
+    if (!employeeNo) throw new ApiError(400, 'EMPLOYEE_NO_REQUIRED', '사번을 입력해 주세요.');
+    if (!name) throw new ApiError(400, 'NAME_REQUIRED', '이름을 입력해 주세요.');
+    if (!password) throw new ApiError(400, 'PASSWORD_REQUIRED', '초기 비밀번호를 입력해 주세요.');
+    if (!/^(0|[1-9]\d*)$/.test(initialCreditText)) throw new ApiError(400, 'INVALID_INITIAL_CREDIT', '초기 크레딧은 0 이상의 정수여야 합니다.');
+    try {
+      const person = await rpc('zip_market_admin_create_participant', {
+        p_employee_no: employeeNo,
+        p_name: name,
+        p_password: password,
+        p_initial_credit: Number(initialCreditText)
+      });
+      return response(201, { ok: true, participant: normalizeRpcResult(person) });
+    } catch (error) {
+      throw friendlyDatabaseError(error);
+    }
   }
 
   if (method === 'POST' && path === '/admin/participants/bulk') {
-    if (!Array.isArray(body.participants) || body.participants.length > 500) throw new ApiError(400, 'INVALID_BULK_DATA', '일괄 등록 데이터가 올바르지 않습니다.');
-    const results = [];
-    for (const item of body.participants) {
-      try {
-        const person = await rpc('zip_market_admin_create_participant', {
-          p_employee_no: String(item.employeeNo || ''), p_name: String(item.name || ''),
-          p_password: String(item.password || ''), p_initial_credit: Number(item.initialCredit || 0)
-        });
-        results.push({ ok: true, employeeNo: item.employeeNo, participant: person });
-      } catch (error) {
-        results.push({ ok: false, employeeNo: item.employeeNo, error: error.detail || error.message });
-      }
+    if (!Array.isArray(body.participants) || body.participants.length < 1 || body.participants.length > 500) {
+      throw new ApiError(400, 'INVALID_BULK_DATA', 'Excel 등록 데이터는 1행 이상 500행 이하여야 합니다.');
     }
-    return response(200, { ok: true, results });
+    const rows = body.participants.map((item, index) => ({
+      employeeNo: String(item?.employeeNo || '').trim(),
+      name: String(item?.name || '').trim(),
+      password: String(item?.password || ''),
+      initialCredit: item?.initialCredit
+    }));
+    for (let index = 0; index < rows.length; index += 1) {
+      const item = rows[index];
+      const row = index + 1;
+      if (!item.employeeNo) throw new ApiError(400, 'EMPLOYEE_NO_REQUIRED', `${row}행: 사번이 없습니다.`);
+      if (!item.name) throw new ApiError(400, 'NAME_REQUIRED', `${row}행: 이름이 없습니다.`);
+      if (!item.password) throw new ApiError(400, 'PASSWORD_REQUIRED', `${row}행: 비밀번호가 없습니다.`);
+      const creditText = String(item.initialCredit ?? '').trim();
+      if (!/^(0|[1-9]\d*)$/.test(creditText)) throw new ApiError(400, 'INVALID_INITIAL_CREDIT', `${row}행: 초기 크레딧은 0 이상의 정수여야 합니다.`);
+      item.initialCredit = Number(creditText);
+      const first = rows.findIndex((candidate) => candidate.employeeNo === item.employeeNo);
+      if (first !== index) throw new ApiError(409, 'DUPLICATE_EMPLOYEE_NO_IN_FILE', `${row}행: Excel 내용에 같은 사번이 중복되어 있습니다. (${item.employeeNo})`);
+    }
+    try {
+      const result = normalizeRpcResult(await rpc('zip_market_admin_create_participants', { p_participants: rows }));
+      return response(201, { ok: true, createdCount: Number(result?.createdCount || rows.length), results: result?.results || [] });
+    } catch (error) {
+      throw friendlyDatabaseError(error);
+    }
   }
 
   const participantDelete = path.match(/^\/admin\/participants\/([0-9a-f-]+)$/i);

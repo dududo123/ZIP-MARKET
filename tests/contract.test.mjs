@@ -18,6 +18,7 @@ const rpcContracts = {
   zip_market_auth_admin: ['p_initial_password','p_password'],
   zip_market_auth_participant: ['p_employee_no','p_password'],
   zip_market_admin_create_participant: ['p_employee_no','p_name','p_password','p_initial_credit'],
+  zip_market_admin_create_participants: ['p_participants'],
   zip_market_set_admin_password: ['p_password'],
   zip_market_grant_credit: ['p_participant_id','p_amount','p_description'],
   zip_market_pay_credit: ['p_participant_id','p_amount','p_description'],

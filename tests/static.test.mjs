@@ -14,6 +14,6 @@ for(const name of ['logo.webp','pay-100.webp','pay-200.webp','pay-300.webp','gam
   const file=await stat(new URL(`../public/assets/${name}`,import.meta.url));
   assert.ok(file.size>1000,`${name} appears missing or empty`);
 }
-for(const source of ['/api-response.js?v=8.4.0','/app.js?v=8.4.0','/styles.css?v=8.4.0']) assert.ok(html.includes(source),`cache-busted source missing: ${source}`);
-assert.ok(html.indexOf('/api-response.js?v=8.4.0')<html.indexOf('/app.js?v=8.4.0'),'response parser must load before app.js');
+for(const source of ['/api-response.js?v=8.5.0','/app.js?v=8.5.0','/styles.css?v=8.5.0']) assert.ok(html.includes(source),`cache-busted source missing: ${source}`);
+assert.ok(html.indexOf('/api-response.js?v=8.5.0')<html.indexOf('/app.js?v=8.5.0'),'response parser must load before app.js');
 console.log(`static.test: ${referencedIds.size} DOM references, six images and script order passed`);

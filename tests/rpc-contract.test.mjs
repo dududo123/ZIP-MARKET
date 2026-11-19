@@ -12,6 +12,7 @@ const expected = {
   zip_market_auth_admin: [['p_initial_password','text'],['p_password','text']],
   zip_market_auth_participant: [['p_employee_no','text'],['p_password','text']],
   zip_market_admin_create_participant: [['p_employee_no','text'],['p_name','text'],['p_password','text'],['p_initial_credit','integer']],
+  zip_market_admin_create_participants: [['p_participants','jsonb']],
   zip_market_set_admin_password: [['p_password','text']],
   zip_market_grant_credit: [['p_participant_id','uuid'],['p_amount','integer'],['p_description','text']],
   zip_market_pay_credit: [['p_participant_id','uuid'],['p_amount','integer'],['p_description','text']],
@@ -74,5 +75,8 @@ for (const [name, args] of Object.entries(expected)) {
 assert.match(repair, /jsonb_build_object\('initialized',\s*true,\s*'createdNow'/i);
 assert.match(repair, /jsonb_build_object\('authenticated',\s*v_valid\)/i);
 assert.match(repair, /'participant',\s*jsonb_build_object/i);
+assert.match(repair, /jsonb_typeof\(p_participants\)\s*<>\s*'array'/i,'bulk RPC must validate JSON array');
+assert.match(repair, /Pass 1:[\s\S]*Pass 2:/i,'bulk RPC must validate all rows before inserts');
+assert.match(repair, /create function public\.zip_market_admin_create_participants[\s\S]*?return jsonb_build_object\('createdCount'/i,'bulk RPC return shape missing');
 assert.equal(schema, repair.replace('SAFE SUPABASE CONTRACT REPAIR','FULL IDEMPOTENT SUPABASE SCHEMA + CONTRACT REPAIR'), 'schema.sql and repair SQL logic diverged');
-console.log('rpc-contract.test: parsed eight API calls and both SQL files; signatures, parameters, returns, grants, revokes and cache refresh match exactly');
+console.log('rpc-contract.test: parsed nine API RPC contracts and both SQL files; signatures, parameters, returns, grants, revokes and cache refresh match exactly');

@@ -1,4 +1,4 @@
--- ZIP! MARKET v8.4.0 — FULL IDEMPOTENT SUPABASE SCHEMA + CONTRACT REPAIR
+-- ZIP! MARKET v8.5.0 — FULL IDEMPOTENT SUPABASE SCHEMA + CONTRACT REPAIR
 -- Run this entire file once in Supabase > SQL Editor > New query.
 -- It preserves rows. It never drops tables and never deletes participant, game,
 -- transaction, completion, or setting data. It only replaces ZIP! MARKET RPCs.
@@ -39,7 +39,9 @@ create table if not exists public.transactions (
   id uuid primary key default gen_random_uuid(),
   participant_id uuid not null references public.participants(id) on delete cascade,
   amount integer not null,
+  kind text not null default 'payment',
   type text not null default 'payment',
+  label text not null default '',
   description text not null default '',
   balance_after integer,
   reference text,
@@ -74,7 +76,9 @@ alter table public.games add column if not exists created_at timestamptz default
 
 alter table public.transactions add column if not exists participant_id uuid;
 alter table public.transactions add column if not exists amount integer;
+alter table public.transactions add column if not exists kind text;
 alter table public.transactions add column if not exists type text;
+alter table public.transactions add column if not exists label text;
 alter table public.transactions add column if not exists description text;
 alter table public.transactions add column if not exists balance_after integer;
 alter table public.transactions add column if not exists reference text;
@@ -119,8 +123,20 @@ update public.games set image_url = '/assets/game-default.svg' where image_url i
 update public.games set reward = 100 where reward is null or reward < 0;
 update public.games set created_at = now() where created_at is null;
 
-update public.transactions set type = 'payment' where type is null or btrim(type) = '';
-update public.transactions set description = '' where description is null;
+update public.transactions
+   set kind = case
+     when coalesce(reference, '') like 'initial:%' then 'initial'
+     when coalesce(reference, '') like 'game:%' or coalesce(type, '') = 'game_reward' then 'game'
+     when coalesce(type, '') in ('grant','award','initial') then 'credit'
+     when coalesce(type, '') = 'adjustment' and amount >= 0 then 'credit'
+     when coalesce(type, '') = 'adjustment' and amount < 0 then 'payment'
+     else coalesce(nullif(btrim(type), ''), case when amount >= 0 then 'credit' else 'payment' end)
+   end
+ where kind is null or btrim(kind) = '';
+update public.transactions set type = coalesce(nullif(btrim(type), ''), kind, case when amount >= 0 then 'grant' else 'payment' end) where type is null or btrim(type) = '';
+update public.transactions set description = coalesce(description, label, '') where description is null;
+update public.transactions set label = coalesce(label, description, '') where label is null;
+update public.transactions set balance_after = 0 where balance_after is null;
 update public.transactions set created_at = now() where created_at is null;
 update public.game_completions set rewarded_amount = 0 where rewarded_amount is null;
 update public.game_completions set created_at = coalesce(created_at, completed_at, now()) where created_at is null;
@@ -131,7 +147,16 @@ alter table public.participants alter column credits set default 0;
 alter table public.games alter column image_url set default '/assets/game-default.svg';
 alter table public.games alter column reward set default 100;
 alter table public.transactions alter column type set default 'payment';
+alter table public.transactions alter column kind set default 'payment';
+alter table public.transactions alter column label set default '';
 alter table public.transactions alter column description set default '';
+alter table public.transactions alter column balance_after set default 0;
+alter table public.transactions alter column kind set not null;
+alter table public.transactions alter column type set not null;
+alter table public.transactions alter column label set not null;
+alter table public.transactions alter column description set not null;
+alter table public.transactions alter column balance_after set not null;
+alter table public.transactions alter column created_at set not null;
 alter table public.game_completions alter column rewarded_amount set default 0;
 alter table public.game_completions alter column completed_at set default now();
 
@@ -140,6 +165,29 @@ create unique index if not exists participants_employee_id_uidx on public.partic
 create index if not exists transactions_participant_created_idx on public.transactions(participant_id, created_at desc);
 create index if not exists game_completions_participant_idx on public.game_completions(participant_id);
 create unique index if not exists game_completions_participant_game_uidx on public.game_completions(participant_id, game_id);
+
+-- Synchronize all known transaction column generations. This trigger protects
+-- old Functions and future direct inserts as well as the v8.5 RPCs.
+create or replace function public.zip_market_sync_transaction_compat()
+returns trigger
+language plpgsql
+set search_path = public, extensions, pg_catalog
+as $$
+begin
+  new.kind := coalesce(nullif(btrim(new.kind), ''), nullif(btrim(new.type), ''), case when new.amount >= 0 then 'credit' else 'payment' end);
+  new.type := coalesce(nullif(btrim(new.type), ''), new.kind);
+  new.description := coalesce(new.description, new.label, '');
+  new.label := coalesce(new.label, new.description, '');
+  new.balance_after := coalesce(new.balance_after, 0);
+  new.created_at := coalesce(new.created_at, now());
+  return new;
+end;
+$$;
+
+drop trigger if exists zip_market_transaction_compat_trg on public.transactions;
+create trigger zip_market_transaction_compat_trg
+before insert or update on public.transactions
+for each row execute function public.zip_market_sync_transaction_compat();
 
 -- Keep v5/v8 and v7 participant columns synchronized.
 create or replace function public.zip_market_sync_participant_compat()
@@ -192,6 +240,7 @@ drop function if exists public.zip_market_initialize_admin(text);
 drop function if exists public.zip_market_auth_admin(text, text);
 drop function if exists public.zip_market_auth_participant(text, text);
 drop function if exists public.zip_market_admin_create_participant(text, text, text, integer);
+drop function if exists public.zip_market_admin_create_participants(jsonb);
 drop function if exists public.zip_market_set_admin_password(text);
 drop function if exists public.zip_market_grant_credit(uuid, integer, text);
 drop function if exists public.zip_market_pay_credit(uuid, integer, text);
@@ -333,13 +382,98 @@ begin
   ) returning * into v_person;
 
   if v_opening > 0 then
-    insert into public.transactions(participant_id, amount, type, description, balance_after, reference)
-    values (v_person.id, v_opening, 'adjustment', '초기 크레딧', v_opening, 'initial:' || v_person.id::text);
+    insert into public.transactions(
+      participant_id, amount, kind, type, label, description,
+      balance_after, reference, created_at
+    ) values (
+      v_person.id, v_opening, 'initial', 'adjustment', '초기 크레딧', '초기 크레딧',
+      v_opening, 'initial:' || v_person.id::text, now()
+    );
   end if;
 
   return to_jsonb(v_person) - 'password_hash' - 'password';
 exception
   when unique_violation then
+    raise exception 'EMPLOYEE_NO_ALREADY_EXISTS' using errcode = '23505';
+end;
+$$;
+
+-- Atomic Excel/bulk registration. Every row is validated before the first
+-- insert. Any duplicate/race/database error aborts the whole RPC transaction,
+-- so no partial participant set is left behind.
+create function public.zip_market_admin_create_participants(p_participants jsonb)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_catalog
+as $$
+declare
+  v_item jsonb;
+  v_row integer := 0;
+  v_employee_no text;
+  v_name text;
+  v_password text;
+  v_initial_credit integer;
+  v_seen text[] := array[]::text[];
+  v_created jsonb := '[]'::jsonb;
+  v_person jsonb;
+begin
+  if p_participants is null or jsonb_typeof(p_participants) <> 'array'
+     or jsonb_array_length(p_participants) = 0
+     or jsonb_array_length(p_participants) > 500 then
+    raise exception 'BULK_DATA_REQUIRED' using errcode = '22023';
+  end if;
+
+  -- Pass 1: validate every row and all duplicates before writing anything.
+  for v_item in select value from jsonb_array_elements(p_participants)
+  loop
+    v_row := v_row + 1;
+    v_employee_no := btrim(coalesce(v_item->>'employeeNo', ''));
+    v_name := btrim(coalesce(v_item->>'name', ''));
+    v_password := coalesce(v_item->>'password', '');
+    begin
+      v_initial_credit := coalesce(nullif(v_item->>'initialCredit', '')::integer, 0);
+    exception when invalid_text_representation or numeric_value_out_of_range then
+      raise exception 'ROW_%: INVALID_INITIAL_CREDIT', v_row using errcode = '22023';
+    end;
+
+    if v_employee_no = '' then raise exception 'ROW_%: EMPLOYEE_NO_REQUIRED', v_row using errcode = '22023'; end if;
+    if v_name = '' then raise exception 'ROW_%: NAME_REQUIRED', v_row using errcode = '22023'; end if;
+    if v_password = '' then raise exception 'ROW_%: PASSWORD_REQUIRED', v_row using errcode = '22023'; end if;
+    if v_initial_credit < 0 then raise exception 'ROW_%: INVALID_INITIAL_CREDIT', v_row using errcode = '22023'; end if;
+    if v_employee_no = any(v_seen) then raise exception 'ROW_%: DUPLICATE_EMPLOYEE_NO_IN_FILE (%)', v_row, v_employee_no using errcode = '23505'; end if;
+    if exists (select 1 from public.participants where employee_no = v_employee_no or employee_id = v_employee_no) then
+      raise exception 'ROW_%: EMPLOYEE_NO_ALREADY_EXISTS (%)', v_row, v_employee_no using errcode = '23505';
+    end if;
+    v_seen := array_append(v_seen, v_employee_no);
+  end loop;
+
+  -- Pass 2: all rows are valid; create them in one database transaction.
+  v_row := 0;
+  for v_item in select value from jsonb_array_elements(p_participants)
+  loop
+    v_row := v_row + 1;
+    begin
+      v_person := public.zip_market_admin_create_participant(
+        btrim(v_item->>'employeeNo'),
+        btrim(v_item->>'name'),
+        v_item->>'password',
+        coalesce(nullif(v_item->>'initialCredit', '')::integer, 0)
+      );
+    exception when unique_violation then
+      raise exception 'ROW_%: EMPLOYEE_NO_ALREADY_EXISTS (%)', v_row, v_item->>'employeeNo' using errcode = '23505';
+    end;
+    v_created := v_created || jsonb_build_array(jsonb_build_object(
+      'row', v_row,
+      'employeeNo', v_item->>'employeeNo',
+      'participant', v_person
+    ));
+  end loop;
+
+  return jsonb_build_object('createdCount', v_row, 'results', v_created);
+exception
+  when unique_violation then
+    if sqlerrm like 'ROW_%' then raise; end if;
     raise exception 'EMPLOYEE_NO_ALREADY_EXISTS' using errcode = '23505';
 end;
 $$;
@@ -387,8 +521,8 @@ begin
    returning credit_balance into v_balance;
   if v_balance is null then raise exception 'PARTICIPANT_NOT_FOUND' using errcode = 'P0002'; end if;
 
-  insert into public.transactions(participant_id, amount, type, description, balance_after, reference)
-  values (p_participant_id, p_amount, 'adjustment', coalesce(nullif(p_description, ''), '관리자 지급'), v_balance, 'grant:' || gen_random_uuid()::text);
+  insert into public.transactions(participant_id, amount, kind, type, label, description, balance_after, reference, created_at)
+  values (p_participant_id, p_amount, 'credit', 'adjustment', coalesce(nullif(p_description, ''), '관리자 지급'), coalesce(nullif(p_description, ''), '관리자 지급'), v_balance, 'grant:' || gen_random_uuid()::text, now());
   return jsonb_build_object('ok', true, 'balance', v_balance);
 end;
 $$;
@@ -418,8 +552,8 @@ begin
    returning credit_balance into v_balance;
   if v_balance is null then raise exception 'INSUFFICIENT_CREDIT' using errcode = 'P0001'; end if;
 
-  insert into public.transactions(participant_id, amount, type, description, balance_after, reference)
-  values (p_participant_id, -p_amount, 'payment', coalesce(nullif(p_description, ''), '크레딧 결제'), v_balance, 'pay:' || gen_random_uuid()::text);
+  insert into public.transactions(participant_id, amount, kind, type, label, description, balance_after, reference, created_at)
+  values (p_participant_id, -p_amount, 'payment', 'payment', coalesce(nullif(p_description, ''), '크레딧 결제'), coalesce(nullif(p_description, ''), '크레딧 결제'), v_balance, 'pay:' || gen_random_uuid()::text, now());
   return jsonb_build_object('ok', true, 'balance', v_balance);
 end;
 $$;
@@ -462,8 +596,8 @@ begin
    returning credit_balance into v_balance;
 
   if v_reward > 0 then
-    insert into public.transactions(participant_id, amount, type, description, balance_after, reference)
-    values (p_participant_id, v_reward, 'adjustment', v_name || ' 완료 보상', v_balance, 'game:' || p_game_id::text);
+    insert into public.transactions(participant_id, amount, kind, type, label, description, balance_after, reference, created_at)
+    values (p_participant_id, v_reward, 'game', 'adjustment', v_name || ' 완료 보상', v_name || ' 완료 보상', v_balance, 'game:' || p_game_id::text, now());
   end if;
 
   return jsonb_build_object('ok', true, 'gameId', p_game_id, 'reward', v_reward, 'balance', v_balance);
@@ -503,6 +637,7 @@ revoke all on function public.zip_market_initialize_admin(text) from public, ano
 revoke all on function public.zip_market_auth_admin(text, text) from public, anon, authenticated;
 revoke all on function public.zip_market_auth_participant(text, text) from public, anon, authenticated;
 revoke all on function public.zip_market_admin_create_participant(text, text, text, integer) from public, anon, authenticated;
+revoke all on function public.zip_market_admin_create_participants(jsonb) from public, anon, authenticated;
 revoke all on function public.zip_market_set_admin_password(text) from public, anon, authenticated;
 revoke all on function public.zip_market_grant_credit(uuid, integer, text) from public, anon, authenticated;
 revoke all on function public.zip_market_pay_credit(uuid, integer, text) from public, anon, authenticated;
@@ -514,6 +649,7 @@ grant execute on function public.zip_market_initialize_admin(text) to service_ro
 grant execute on function public.zip_market_auth_admin(text, text) to service_role;
 grant execute on function public.zip_market_auth_participant(text, text) to service_role;
 grant execute on function public.zip_market_admin_create_participant(text, text, text, integer) to service_role;
+grant execute on function public.zip_market_admin_create_participants(jsonb) to service_role;
 grant execute on function public.zip_market_set_admin_password(text) to service_role;
 grant execute on function public.zip_market_grant_credit(uuid, integer, text) to service_role;
 grant execute on function public.zip_market_pay_credit(uuid, integer, text) to service_role;
@@ -522,7 +658,7 @@ grant execute on function public.zip_auth_admin(text, text) to service_role;
 grant execute on function public.zip_auth_participant(text, text) to service_role;
 
 insert into public.app_settings(key, value, updated_at)
-values ('schema_version', '8.4.0', now())
+values ('schema_version', '8.5.0', now())
 on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at;
 
 -- ---------------------------------------------------------------------------
@@ -540,6 +676,7 @@ begin
     ('public.zip_market_auth_admin(text,text)'),
     ('public.zip_market_auth_participant(text,text)'),
     ('public.zip_market_admin_create_participant(text,text,text,integer)'),
+    ('public.zip_market_admin_create_participants(jsonb)'),
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text)'),
@@ -554,6 +691,7 @@ begin
     ('public.zip_market_auth_admin(text,text)'),
     ('public.zip_market_auth_participant(text,text)'),
     ('public.zip_market_admin_create_participant(text,text,text,integer)'),
+    ('public.zip_market_admin_create_participants(jsonb)'),
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text)'),
@@ -568,6 +706,7 @@ begin
     ('public.zip_market_auth_admin(text,text)'),
     ('public.zip_market_auth_participant(text,text)'),
     ('public.zip_market_admin_create_participant(text,text,text,integer)'),
+    ('public.zip_market_admin_create_participants(jsonb)'),
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text)'),
@@ -602,6 +741,7 @@ where n.nspname = 'public'
     'zip_market_auth_admin',
     'zip_market_auth_participant',
     'zip_market_admin_create_participant',
+    'zip_market_admin_create_participants',
     'zip_market_set_admin_password',
     'zip_market_grant_credit',
     'zip_market_pay_credit',

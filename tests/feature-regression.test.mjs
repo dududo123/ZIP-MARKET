@@ -31,6 +31,9 @@ const transactionDelete=api.indexOf('transactions?participant_id=eq.');
 const participantDelete=api.indexOf('participants?id=eq.');
 assert.ok(completionDelete>=0&&completionDelete<transactionDelete&&transactionDelete<participantDelete,'participant child deletion order regressed');
 assert.ok(app.includes('delete-participant'),'participant delete UI missing');
+assert.ok(app.includes('resetFormSafely'),'null-safe administrator form reset missing');
+assert.ok(app.includes('parseBulkParticipants'),'Excel row validation missing');
+assert.ok(api.includes("rpc('zip_market_admin_create_participants'"),'atomic Excel bulk RPC route missing');
 
 // Navigation, modals and back behavior.
 assert.ok(app.includes("addEventListener('popstate'")||app.includes('addEventListener("popstate"'),'history popstate handler missing');
