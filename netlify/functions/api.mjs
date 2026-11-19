@@ -1,6 +1,6 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-const VERSION = '8.5.0';
+const VERSION = '8.6.0';
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -38,6 +38,10 @@ const friendlyDatabaseError = (error) => {
   if (/EMPLOYEE_NO_ALREADY_EXISTS|duplicate key|participants_employee/i.test(detail)) {
     return new ApiError(409, 'EMPLOYEE_NO_ALREADY_EXISTS', '이미 등록된 사번입니다.', detail);
   }
+  if (/INSUFFICIENT_CREDIT/i.test(detail)) return new ApiError(409, 'INSUFFICIENT_CREDIT', '크레딧이 부족합니다.', detail);
+  if (/ALREADY_COMPLETED|game_completions_participant_game/i.test(detail)) return new ApiError(409, 'ALREADY_COMPLETED', '이미 완료한 게임입니다.', detail);
+  if (/GAME_NOT_FOUND/i.test(detail)) return new ApiError(404, 'GAME_NOT_FOUND', '게임을 찾을 수 없습니다.', detail);
+  if (/PARTICIPANT_NOT_FOUND/i.test(detail)) return new ApiError(404, 'PARTICIPANT_NOT_FOUND', '참가자를 찾을 수 없습니다.', detail);
   return error;
 };
 
@@ -147,7 +151,7 @@ async function health() {
     adminCreatedNow: Boolean(initialized?.createdNow),
     transport: 'direct-rest',
     runtime: 'netlify-modern-response',
-    schema: 'zip-market-v8.5',
+    schema: 'zip-market-v8.6',
     version: VERSION
   };
 }
@@ -209,15 +213,23 @@ async function route(request) {
     const auth = verifyToken(request, 'participant');
     const amount = Number(body.amount);
     if (!Number.isInteger(amount) || amount <= 0) throw new ApiError(400, 'INVALID_AMOUNT', '결제 금액이 올바르지 않습니다.');
-    const result = await rpc('zip_market_pay_credit', { p_participant_id: auth.sub, p_amount: amount, p_description: String(body.description || `${amount}C 결제`) });
-    return response(200, { ok: true, result, ...(await participantDashboard(auth.sub)) });
+    const suppliedRequestId = String(body.requestId || '').trim();
+    if (suppliedRequestId && !/^[A-Za-z0-9._-]{8,100}$/.test(suppliedRequestId)) throw new ApiError(400, 'INVALID_REQUEST_ID', '결제 요청 정보가 올바르지 않습니다.');
+    const requestId = suppliedRequestId || `legacy-${randomUUID()}`;
+    try {
+      const result = await rpc('zip_market_pay_credit', { p_participant_id: auth.sub, p_amount: amount, p_description: String(body.description || `${amount}C 결제`), p_request_id: requestId });
+      return response(200, { ok: true, result, ...(await participantDashboard(auth.sub)) });
+    } catch (error) { throw friendlyDatabaseError(error); }
   }
 
   if (method === 'POST' && path === '/participant/complete-game') {
     const auth = verifyToken(request, 'participant');
-    if (!body.gameId) throw new ApiError(400, 'INVALID_GAME_ID', '게임 정보가 없습니다.');
-    const result = await rpc('zip_market_complete_game', { p_participant_id: auth.sub, p_game_id: body.gameId });
-    return response(200, { ok: true, result, ...(await participantDashboard(auth.sub)) });
+    const gameId = String(body.gameId || '').trim();
+    if (!gameId || gameId.length > 200) throw new ApiError(400, 'INVALID_GAME_ID', '게임 정보가 없습니다.');
+    try {
+      const result = await rpc('zip_market_complete_game', { p_participant_id: auth.sub, p_game_id: gameId });
+      return response(200, { ok: true, result, ...(await participantDashboard(auth.sub)) });
+    } catch (error) { throw friendlyDatabaseError(error); }
   }
 
   if (path.startsWith('/admin')) verifyToken(request, 'admin');
@@ -310,9 +322,9 @@ async function route(request) {
     return response(201, { ok: true, game: data?.[0] });
   }
 
-  const gameDelete = path.match(/^\/admin\/games\/([0-9a-f-]+)$/i);
+  const gameDelete = path.match(/^\/admin\/games\/([^/]{1,200})$/i);
   if (method === 'DELETE' && gameDelete) {
-    const gameId = encodeURIComponent(gameDelete[1]);
+    const gameId = encodeURIComponent(decodeURIComponent(gameDelete[1]));
     await supabase(`game_completions?game_id=eq.${gameId}`, { method: 'DELETE', prefer: 'return=minimal' });
     await supabase(`games?id=eq.${gameId}`, { method: 'DELETE', prefer: 'return=minimal' });
     return response(200, { ok: true });

@@ -1,150 +1,84 @@
-# ZIP! MARKET v8.5.0 — participant registration compatibility repair
+# ZIP! MARKET v8.6.0 — 행사 안정화 통합본
 
-This complete project fixes both administrator registration paths against the existing production database:
+v8.5의 참가자 등록·Excel 등록·기존 DB 호환 수정을 모두 유지하면서, 실제 행사에서 확인된 QR·게임·결제·관리자 비밀번호 문제를 수정한 전체 배포 프로젝트입니다.
 
-- Single participant registration
-- Excel/bulk participant registration
+## v8.6 핵심 수정
 
-It preserves the v8.4 UI, authentication, credits, payments, games, QR, deletion, navigation, fonts, responsive images, and all six supplied images.
+### 참가자 QR 스캔
+- `사진에서 QR 읽기` 기능과 파일 선택 UI를 제거했습니다.
+- 홈의 `QR 스캔` 또는 미완료 게임 카드를 누르면 카메라가 자동으로 시작됩니다.
+- 권한 거부/카메라 실패 때만 `카메라 다시 시도` 버튼이 표시됩니다.
+- 새 QR은 짧은 `ZIPMARKET|...` 형식으로 생성해 인식률을 높였습니다.
+- 기존 JSON QR과 URL형 QR도 계속 읽을 수 있습니다.
+- 임의 QR은 거부하고, 게임 카드에서 시작한 스캔은 선택한 게임의 QR만 허용합니다.
 
-## Confirmed failures and causes
+### 게임 완료와 크레딧
+- `balloon`, `pingpong` 같은 기존 문자형 게임 ID와 신규 UUID 게임 ID를 모두 처리합니다.
+- 게임 완료, 중복 완료 방지, 보상 크레딧 지급, 거래내역 생성을 하나의 DB 트랜잭션으로 유지합니다.
+- 게임 카드를 누르면 해당 게임 완료 QR 스캐너가 바로 열립니다.
 
-### Database failure
+### 결제 QR과 결제 상태
+- 관리자 결제 QR을 새 표준 형식으로 생성하며, 참가자 스캐너는 새 형식과 기존 형식을 모두 해석합니다.
+- 결제 버튼에 20초 응답 제한과 확실한 상태 초기화를 적용했습니다. 요청이 실패해도 계속 `결제 중…`으로 남지 않습니다.
+- 각 결제 확인에 고유 요청 ID를 부여하고 DB에서 멱등 처리합니다. 같은 요청이 재전송되어도 이중 차감하지 않습니다.
+- 쓰기 요청은 라우팅 오류 때 자동 재전송하지 않아 네트워크 오류로 인한 중복 결제를 막습니다.
 
-The production `transactions` table contains an older required column:
+### 이미지 카드
+- 결제·게임 카드 이미지를 원본 3:2 비율의 정상 문서 흐름으로 배치했습니다.
+- 고정 높이/모바일 `max-height` 충돌을 제거해 이미지와 아래 텍스트가 겹치지 않습니다.
+- 390px 이하 화면은 한 열로 표시하고 이미지 전체를 `contain`으로 유지합니다.
 
-```text
-kind NOT NULL
-```
+### 관리자 비밀번호
+- `INITIAL_ADMIN_PASSWORD`는 최초 관리자 생성에만 사용합니다.
+- 관리자 화면에서 비밀번호를 바꾼 뒤 예전 환경변수 비밀번호로 로그인하면 새 비밀번호가 다시 덮어써지던 복구 로직을 제거했습니다.
+- 변경 후에는 새 비밀번호만 로그인에 사용됩니다.
 
-The v8.4 participant-creation RPC inserted only the newer columns (`type`, `description`, `balance_after`, and `reference`). A registration with 10,000 initial credits therefore attempted to create a transaction where `kind` was null, and PostgreSQL rolled back the participant creation.
+## 반드시 지킬 적용 순서
 
-v8.5 repairs and synchronizes these compatibility fields:
+### 1. Supabase 복구 SQL 실행
+1. Supabase → **SQL Editor** → **New query**를 엽니다.
+2. `supabase/schema-repair.sql` 전체를 복사해 새 쿼리에 붙여넣습니다.
+3. 일부 텍스트가 선택되지 않은 상태에서 **Run**을 한 번 누릅니다.
+4. 마지막 결과의 `schema_version`이 `8.6.0`인지 확인합니다.
 
-- `kind`
-- `type`
-- `label`
-- `description`
-- `balance_after`
-- `reference`
-- `created_at`
+이 SQL은 `DROP TABLE`, `DELETE FROM`, `TRUNCATE`를 사용하지 않으며 참가자·게임·거래·완료 데이터를 삭제하지 않습니다. ZIP! MARKET 함수와 호환 컬럼/인덱스만 비파괴 방식으로 보완합니다.
 
-Every initial-credit, administrator grant, payment, and game-reward insert now supplies all of them explicitly. A database trigger also normalizes future/legacy inserts.
-
-### Frontend failure
-
-The old asynchronous handlers called:
-
-```js
-e.currentTarget.reset()
-```
-
-after one or more `await` operations. At that point the event's `currentTarget` can be null, producing:
-
-```text
-Cannot read properties of null (reading 'reset')
-```
-
-v8.5 captures the form element before awaiting, confirms that it is an `HTMLFormElement`, and uses `resetFormSafely()` on the correct form:
-
-- Single registration resets `#participant-create-form` and focuses `employeeNo`.
-- Bulk registration resets `#participant-bulk-form` and focuses its textarea.
-
-## Safe application order
-
-### 1. Run the Supabase repair first
-
-1. Open **Supabase → SQL Editor → New query**.
-2. Open `supabase/schema-repair.sql` from this project.
-3. Copy the entire file into the new query.
-4. Ensure no partial text is selected.
-5. Press **Run** once.
-
-The SQL is data-preserving:
-
-- no `DROP TABLE`;
-- no `DELETE FROM`;
-- no `TRUNCATE`;
-- no participant, transaction, game, completion, or setting rows removed.
-
-It backfills missing compatibility values before applying NOT NULL guarantees, recreates the registration RPCs, grants only `service_role`, verifies the catalog, and refreshes PostgREST.
-
-### 2. Deploy the complete project
-
-1. Replace the GitHub repository with the complete v8.5 project.
-2. Keep `.env.example`; never upload a real `.env`.
-3. Preserve the four Netlify variables:
+### 2. GitHub 전체 교체 및 Netlify 배포
+1. 압축을 풀고 GitHub 저장소의 기존 프로젝트 파일을 v8.6 파일로 **전체 교체**합니다.
+2. `.env.example`은 올려도 되지만 실제 비밀값이 있는 `.env`는 올리지 않습니다.
+3. Netlify 환경변수 4개는 유지합니다.
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `JWT_SECRET`
    - `INITIAL_ADMIN_PASSWORD`
-4. Use **Clear cache and deploy site** once.
-5. Check `/api/health`, administrator login, single registration, Excel registration, and participant login.
+4. Netlify에서 **Clear cache and deploy site**를 한 번 실행합니다.
 
-Expected health version:
+### 3. 배포 확인
+`/api/health` 예상 핵심 값:
 
 ```json
 {
   "ok": true,
   "database": true,
-  "schema": "zip-market-v8.5",
-  "version": "8.5.0"
+  "schema": "zip-market-v8.6",
+  "version": "8.6.0"
 }
 ```
 
-## Registration behavior
+확인 순서:
+1. 관리자 로그인
+2. 관리자 비밀번호 변경 → 로그아웃 → 새 비밀번호 로그인
+3. 참가자 로그인
+4. 100C 결제 2회 연속 실행 및 버튼 정상 복귀 확인
+5. 관리자 결제 QR 생성 → 참가자 QR 스캔
+6. 게임 카드 선택 → 자동 카메라 시작 → 해당 게임 QR 스캔 → 보상/완료 확인
+7. iPhone 13 mini 크기에서 결제·게임 이미지와 텍스트 비겹침 확인
 
-### Single registration
-
-- Validates required employee number, name, password, and nonnegative integer credit.
-- Creates participant and initial-credit transaction atomically.
-- Converts duplicate employee numbers to a clear `EMPLOYEE_NO_ALREADY_EXISTS` message.
-- A newly registered participant can log in using the supplied password.
-
-### Excel registration
-
-Expected columns per non-empty row:
-
-```text
-employee number<TAB>name<TAB>password<TAB>initial credit
-```
-
-The browser reports row-specific errors for:
-
-- missing columns;
-- missing employee number, name, or password;
-- noninteger or negative credit;
-- duplicate employee number within the pasted data.
-
-The server sends all valid rows to one database RPC. The RPC performs two passes:
-
-1. Validate every row and every duplicate before writing.
-2. Create all rows in one PostgreSQL transaction.
-
-If any validation, existing-employee, race, or transaction error occurs, the entire RPC is rolled back. It cannot leave earlier Excel rows registered while later rows fail.
-
-## Exact registration RPCs
-
-```text
-zip_market_admin_create_participant(
-  p_employee_no text,
-  p_name text,
-  p_password text,
-  p_initial_credit integer
-) returns jsonb
-
-zip_market_admin_create_participants(
-  p_participants jsonb
-) returns jsonb
-```
-
-## Verification
-
-Run:
+## 검증
 
 ```bash
 npm test
 npm run check
 ```
 
-The suite covers SQL/API signatures and privileges, old/new transaction schemas including required `kind`, single registration, atomic Excel success and rollback cases, duplicate employee numbers, participant login after registration, executable form reset and Excel parser tests, API routes, administrator login, payment, games, deletion, QR, history, transaction display, fonts, responsive images, static resources, and JavaScript syntax.
+자동 검증은 SQL/API RPC 계약, 관리자 비밀번호 변경, 문자형 게임 ID, 결제 요청 멱등성, QR 새/구형 형식, 사진 QR UI 제거, 자동 카메라 진입, 게임 카드 진입, 이미지 비율, 참가자 등록, Excel 등록, 로그인, 삭제, 라우팅, 응답 형식과 JavaScript 문법을 포함합니다.

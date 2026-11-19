@@ -15,8 +15,8 @@ const expected = {
   zip_market_admin_create_participants: [['p_participants','jsonb']],
   zip_market_set_admin_password: [['p_password','text']],
   zip_market_grant_credit: [['p_participant_id','uuid'],['p_amount','integer'],['p_description','text']],
-  zip_market_pay_credit: [['p_participant_id','uuid'],['p_amount','integer'],['p_description','text']],
-  zip_market_complete_game: [['p_participant_id','uuid'],['p_game_id','uuid']]
+  zip_market_pay_credit: [['p_participant_id','uuid'],['p_amount','integer'],['p_description','text'],['p_request_id','text']],
+  zip_market_complete_game: [['p_participant_id','uuid'],['p_game_id','text']]
 };
 
 function parseSqlFunctions(sql) {
@@ -78,5 +78,8 @@ assert.match(repair, /'participant',\s*jsonb_build_object/i);
 assert.match(repair, /jsonb_typeof\(p_participants\)\s*<>\s*'array'/i,'bulk RPC must validate JSON array');
 assert.match(repair, /Pass 1:[\s\S]*Pass 2:/i,'bulk RPC must validate all rows before inserts');
 assert.match(repair, /create function public\.zip_market_admin_create_participants[\s\S]*?return jsonb_build_object\('createdCount'/i,'bulk RPC return shape missing');
-assert.equal(schema, repair.replace('SAFE SUPABASE CONTRACT REPAIR','FULL IDEMPOTENT SUPABASE SCHEMA + CONTRACT REPAIR'), 'schema.sql and repair SQL logic diverged');
+assert.doesNotMatch(repair, /not\s+v_valid\s+and\s+p_password\s*=\s*p_initial_password/i,'bootstrap password must not overwrite a changed administrator password');
+assert.match(repair, /zip_market_pay_credit[\s\S]*p_request_id[\s\S]*'idempotent'/i,'payment RPC must be idempotent by request ID');
+assert.match(repair, /zip_market_complete_game[\s\S]*from public\.games where id::text = btrim\(p_game_id\)/i,'game completion must accept legacy text and UUID IDs');
+assert.equal(schema.split('\n').slice(1).join('\n'), repair.split('\n').slice(1).join('\n'), 'schema.sql and repair SQL logic diverged');
 console.log('rpc-contract.test: parsed nine API RPC contracts and both SQL files; signatures, parameters, returns, grants, revokes and cache refresh match exactly');

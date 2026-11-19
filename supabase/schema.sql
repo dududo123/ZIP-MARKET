@@ -1,4 +1,4 @@
--- ZIP! MARKET v8.5.0 — FULL IDEMPOTENT SUPABASE SCHEMA + CONTRACT REPAIR
+-- ZIP! MARKET v8.6.0 — FULL IDEMPOTENT SUPABASE SCHEMA + EVENT STABILITY REPAIR
 -- Run this entire file once in Supabase > SQL Editor > New query.
 -- It preserves rows. It never drops tables and never deletes participant, game,
 -- transaction, completion, or setting data. It only replaces ZIP! MARKET RPCs.
@@ -163,11 +163,12 @@ alter table public.game_completions alter column completed_at set default now();
 create unique index if not exists participants_employee_no_uidx on public.participants(employee_no);
 create unique index if not exists participants_employee_id_uidx on public.participants(employee_id);
 create index if not exists transactions_participant_created_idx on public.transactions(participant_id, created_at desc);
+create unique index if not exists transactions_participant_reference_uidx on public.transactions(participant_id, reference) where reference is not null;
 create index if not exists game_completions_participant_idx on public.game_completions(participant_id);
 create unique index if not exists game_completions_participant_game_uidx on public.game_completions(participant_id, game_id);
 
 -- Synchronize all known transaction column generations. This trigger protects
--- old Functions and future direct inserts as well as the v8.5 RPCs.
+-- old Functions and future direct inserts as well as the v8.6 RPCs.
 create or replace function public.zip_market_sync_transaction_compat()
 returns trigger
 language plpgsql
@@ -244,7 +245,9 @@ drop function if exists public.zip_market_admin_create_participants(jsonb);
 drop function if exists public.zip_market_set_admin_password(text);
 drop function if exists public.zip_market_grant_credit(uuid, integer, text);
 drop function if exists public.zip_market_pay_credit(uuid, integer, text);
+drop function if exists public.zip_market_pay_credit(uuid, integer, text, text);
 drop function if exists public.zip_market_complete_game(uuid, uuid);
+drop function if exists public.zip_market_complete_game(uuid, text);
 
 -- ---------------------------------------------------------------------------
 -- 3. Canonical RPC contract. Names, parameter names, types, and JSON shapes
@@ -296,12 +299,9 @@ begin
     end if;
   end if;
 
-  if not v_valid and p_password = p_initial_password and nullif(p_initial_password, '') is not null then
-    update public.app_settings
-       set value = crypt(p_initial_password, gen_salt('bf', 10)), updated_at = now()
-     where key = 'admin_password';
-    v_valid := true;
-  elsif v_valid and v_stored not like '$2%' then
+  -- INITIAL_ADMIN_PASSWORD is bootstrap-only. Never use it as a permanent
+  -- recovery password: doing so would undo a password changed in the admin UI.
+  if v_valid and v_stored not like '$2%' then
     update public.app_settings
        set value = crypt(p_password, gen_salt('bf', 10)), updated_at = now()
      where key = 'admin_password';
@@ -530,7 +530,8 @@ $$;
 create function public.zip_market_pay_credit(
   p_participant_id uuid,
   p_amount integer,
-  p_description text
+  p_description text,
+  p_request_id text
 )
 returns jsonb
 language plpgsql
@@ -539,9 +540,24 @@ set search_path = public, extensions, pg_catalog
 as $$
 declare
   v_balance integer;
+  v_reference text;
 begin
   if p_amount is null or p_amount <= 0 then
     raise exception 'INVALID_AMOUNT' using errcode = '22023';
+  end if;
+
+  -- Serialize payments for a participant and make each browser confirmation
+  -- idempotent. A timeout/retry can no longer charge the same request twice.
+  perform 1 from public.participants where id = p_participant_id for update;
+  if not found then raise exception 'PARTICIPANT_NOT_FOUND' using errcode = 'P0002'; end if;
+
+  v_reference := 'pay:' || coalesce(nullif(btrim(p_request_id), ''), gen_random_uuid()::text);
+  select credit_balance into v_balance from public.participants where id = p_participant_id;
+  if exists (
+    select 1 from public.transactions
+     where participant_id = p_participant_id and reference = v_reference
+  ) then
+    return jsonb_build_object('ok', true, 'idempotent', true, 'balance', v_balance);
   end if;
 
   update public.participants
@@ -553,14 +569,14 @@ begin
   if v_balance is null then raise exception 'INSUFFICIENT_CREDIT' using errcode = 'P0001'; end if;
 
   insert into public.transactions(participant_id, amount, kind, type, label, description, balance_after, reference, created_at)
-  values (p_participant_id, -p_amount, 'payment', 'payment', coalesce(nullif(p_description, ''), '크레딧 결제'), coalesce(nullif(p_description, ''), '크레딧 결제'), v_balance, 'pay:' || gen_random_uuid()::text, now());
-  return jsonb_build_object('ok', true, 'balance', v_balance);
+  values (p_participant_id, -p_amount, 'payment', 'payment', coalesce(nullif(p_description, ''), '크레딧 결제'), coalesce(nullif(p_description, ''), '크레딧 결제'), v_balance, v_reference, now());
+  return jsonb_build_object('ok', true, 'idempotent', false, 'balance', v_balance);
 end;
 $$;
 
 create function public.zip_market_complete_game(
   p_participant_id uuid,
-  p_game_id uuid
+  p_game_id text
 )
 returns jsonb
 language plpgsql
@@ -568,14 +584,19 @@ security definer
 set search_path = public, extensions, pg_catalog
 as $$
 declare
+  v_game public.games%rowtype;
   v_reward integer;
-  v_name text;
   v_balance integer;
   v_inserted integer;
 begin
-  select greatest(coalesce(reward, 0), 0), name into v_reward, v_name
-    from public.games where id = p_game_id;
+  -- Legacy installations use readable text IDs such as "balloon", while new
+  -- installations use UUIDs. Comparing as text and inserting v_game.id keeps
+  -- both schemas valid without converting or deleting existing game rows.
+  select * into v_game
+    from public.games where id::text = btrim(p_game_id)
+    limit 1;
   if not found then raise exception 'GAME_NOT_FOUND' using errcode = 'P0002'; end if;
+  v_reward := greatest(coalesce(v_game.reward, 0), 0);
 
   perform 1 from public.participants where id = p_participant_id for update;
   if not found then raise exception 'PARTICIPANT_NOT_FOUND' using errcode = 'P0002'; end if;
@@ -583,7 +604,7 @@ begin
   insert into public.game_completions(
     participant_id, game_id, rewarded_amount, created_at, completed_at
   ) values (
-    p_participant_id, p_game_id, v_reward, now(), now()
+    p_participant_id, v_game.id, v_reward, now(), now()
   ) on conflict (participant_id, game_id) do nothing;
   get diagnostics v_inserted = row_count;
   if v_inserted = 0 then raise exception 'ALREADY_COMPLETED' using errcode = '23505'; end if;
@@ -597,10 +618,10 @@ begin
 
   if v_reward > 0 then
     insert into public.transactions(participant_id, amount, kind, type, label, description, balance_after, reference, created_at)
-    values (p_participant_id, v_reward, 'game', 'adjustment', v_name || ' 완료 보상', v_name || ' 완료 보상', v_balance, 'game:' || p_game_id::text, now());
+    values (p_participant_id, v_reward, 'game', 'adjustment', v_game.name || ' 완료 보상', v_game.name || ' 완료 보상', v_balance, 'game:' || v_game.id::text, now());
   end if;
 
-  return jsonb_build_object('ok', true, 'gameId', p_game_id, 'reward', v_reward, 'balance', v_balance);
+  return jsonb_build_object('ok', true, 'gameId', v_game.id::text, 'reward', v_reward, 'balance', v_balance);
 end;
 $$;
 
@@ -640,8 +661,8 @@ revoke all on function public.zip_market_admin_create_participant(text, text, te
 revoke all on function public.zip_market_admin_create_participants(jsonb) from public, anon, authenticated;
 revoke all on function public.zip_market_set_admin_password(text) from public, anon, authenticated;
 revoke all on function public.zip_market_grant_credit(uuid, integer, text) from public, anon, authenticated;
-revoke all on function public.zip_market_pay_credit(uuid, integer, text) from public, anon, authenticated;
-revoke all on function public.zip_market_complete_game(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.zip_market_pay_credit(uuid, integer, text, text) from public, anon, authenticated;
+revoke all on function public.zip_market_complete_game(uuid, text) from public, anon, authenticated;
 revoke all on function public.zip_auth_admin(text, text) from public, anon, authenticated;
 revoke all on function public.zip_auth_participant(text, text) from public, anon, authenticated;
 
@@ -652,13 +673,13 @@ grant execute on function public.zip_market_admin_create_participant(text, text,
 grant execute on function public.zip_market_admin_create_participants(jsonb) to service_role;
 grant execute on function public.zip_market_set_admin_password(text) to service_role;
 grant execute on function public.zip_market_grant_credit(uuid, integer, text) to service_role;
-grant execute on function public.zip_market_pay_credit(uuid, integer, text) to service_role;
-grant execute on function public.zip_market_complete_game(uuid, uuid) to service_role;
+grant execute on function public.zip_market_pay_credit(uuid, integer, text, text) to service_role;
+grant execute on function public.zip_market_complete_game(uuid, text) to service_role;
 grant execute on function public.zip_auth_admin(text, text) to service_role;
 grant execute on function public.zip_auth_participant(text, text) to service_role;
 
 insert into public.app_settings(key, value, updated_at)
-values ('schema_version', '8.5.0', now())
+values ('schema_version', '8.6.0', now())
 on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at;
 
 -- ---------------------------------------------------------------------------
@@ -679,8 +700,8 @@ begin
     ('public.zip_market_admin_create_participants(jsonb)'),
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
-    ('public.zip_market_pay_credit(uuid,integer,text)'),
-    ('public.zip_market_complete_game(uuid,uuid)')
+    ('public.zip_market_pay_credit(uuid,integer,text,text)'),
+    ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where to_regprocedure(signature) is null;
   if v_missing is not null then raise exception 'ZIP_MARKET_RPC_MISSING: %', v_missing; end if;
@@ -694,8 +715,8 @@ begin
     ('public.zip_market_admin_create_participants(jsonb)'),
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
-    ('public.zip_market_pay_credit(uuid,integer,text)'),
-    ('public.zip_market_complete_game(uuid,uuid)')
+    ('public.zip_market_pay_credit(uuid,integer,text,text)'),
+    ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where pg_get_function_result(to_regprocedure(signature)) <> 'jsonb';
   if v_bad_return is not null then raise exception 'ZIP_MARKET_RPC_RETURN_MISMATCH: %', v_bad_return; end if;
@@ -709,8 +730,8 @@ begin
     ('public.zip_market_admin_create_participants(jsonb)'),
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
-    ('public.zip_market_pay_credit(uuid,integer,text)'),
-    ('public.zip_market_complete_game(uuid,uuid)')
+    ('public.zip_market_pay_credit(uuid,integer,text,text)'),
+    ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where not has_function_privilege('service_role', to_regprocedure(signature), 'EXECUTE')
      or has_function_privilege('anon', to_regprocedure(signature), 'EXECUTE')

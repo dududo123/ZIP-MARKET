@@ -18,10 +18,12 @@ assert.ok(api.includes("'/participant/pay'"),'payment route missing');
 assert.match(schema,/create function public\.zip_market_pay_credit[\s\S]*insert into public\.transactions/i,'atomic payment transaction missing');
 
 // Games, QR and deletion.
-for (const id of ['open-scanner','qr-file','qr-output','game-create-form','admin-games']) assert.ok(html.includes(`id="${id}"`),`${id} missing`);
+for (const id of ['open-scanner','camera-start','qr-output','game-create-form','admin-games']) assert.ok(html.includes(`id="${id}"`),`${id} missing`);
+assert.ok(!html.includes('id="qr-file"')&&!app.includes('scanFile'),'unused photo QR reader must remain removed');
 assert.ok(app.includes('Html5Qrcode'),'iPhone-compatible QR scanner missing');
 assert.ok(app.includes("payload.type==='payment'")&&app.includes("payload.type==='game'"),'payment/game QR dispatch missing');
 assert.ok(app.includes('game-qr')&&app.includes('delete-game'),'game QR/delete controls missing');
+assert.ok(app.includes('game-card-button')&&app.includes('openScannerFor(card.dataset.gameId'),'game card must launch its QR scanner');
 assert.ok(api.includes("'/participant/complete-game'")&&api.includes("'/admin/games'"),'game API routes missing');
 assert.match(schema,/create function public\.zip_market_complete_game[\s\S]*on conflict \(participant_id, game_id\) do nothing/i,'duplicate-safe game completion missing');
 
@@ -49,6 +51,7 @@ assert.match(css,/font-family:\s*['"]Jua['"]/i,'Jua heading font missing');
 assert.match(css,/object-fit:contain/i,'responsive contain images missing');
 assert.match(css,/@media\(max-width:390px\)/i,'small iPhone breakpoint missing');
 assert.match(css,/\.image-card-grid\{[^}]*grid-template-columns/i,'responsive image grid missing');
+assert.match(css,/\.image-frame\{[^}]*aspect-ratio:3\/2/i,'image frame must follow artwork ratio instead of fixed height');
 
 for(const name of ['logo.webp','pay-100.webp','pay-200.webp','pay-300.webp','game-pingpong.webp','game-balloon.webp']){
   const file=await stat(new URL(`../public/assets/${name}`,import.meta.url));

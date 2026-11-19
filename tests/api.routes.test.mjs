@@ -6,16 +6,17 @@ process.env.JWT_SECRET='a-very-long-mock-jwt-secret-for-tests';
 process.env.INITIAL_ADMIN_PASSWORD='admin1234';
 
 const participantId='11111111-1111-1111-1111-111111111111';
-const gameId='22222222-2222-2222-2222-222222222222';
+const gameId='balloon';
 const calls=[];
 let participantAuth = new Map([['TEST001','1234']]);
+let adminPassword='admin1234';
 const jsonResponse=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}});
 globalThis.fetch=async(url,options={})=>{
   const body=options.body?JSON.parse(options.body):null;
   calls.push({url:String(url),method:options.method||'GET',body});
   const u=String(url);
   if(u.endsWith('/rpc/zip_market_initialize_admin')) return jsonResponse({initialized:true,createdNow:false});
-  if(u.endsWith('/rpc/zip_market_auth_admin')) return jsonResponse({authenticated:body.p_password==='admin1234'});
+  if(u.endsWith('/rpc/zip_market_auth_admin')) return jsonResponse({authenticated:body.p_password===adminPassword});
   if(u.endsWith('/rpc/zip_market_auth_participant')) {
     if(participantAuth.get(body.p_employee_no)===body.p_password) return jsonResponse({authenticated:true,participant:{id:participantId,employee_no:body.p_employee_no,name:'테스트',credit_balance:1000}});
     return jsonResponse({authenticated:false});
@@ -31,7 +32,7 @@ globalThis.fetch=async(url,options={})=>{
     rows.forEach(row=>participantAuth.set(row.employeeNo,row.password));
     return jsonResponse({createdCount:rows.length,results:rows.map((row,index)=>({row:index+1,employeeNo:row.employeeNo,participant:{employee_no:row.employeeNo}}))});
   }
-  if(u.endsWith('/rpc/zip_market_set_admin_password')) return jsonResponse({updated:true});
+  if(u.endsWith('/rpc/zip_market_set_admin_password')) {adminPassword=body.p_password;return jsonResponse({updated:true});}
   if((options.method||'GET')==='DELETE') return new Response(null,{status:204});
   if((options.method||'GET')==='POST'&&u.includes('/games?')) return jsonResponse([{id:gameId,name:body.name,image_url:body.image_url}],201);
   if(u.includes('/participants?')) return jsonResponse([{id:participantId,employee_no:'TEST001',name:'테스트',credit_balance:1000,created_at:'2026-01-01T00:00:00Z'}]);
@@ -51,7 +52,7 @@ const request=(path,method='GET',body,token,direct=false)=>new Request(
 for (const direct of [false,true]) {
   const res=await handler(request('/health','GET',undefined,undefined,direct));
   assert.ok(res instanceof Response);assert.equal(res.status,200);
-  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.5');assert.equal(body.version,'8.5.0');
+  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.6');assert.equal(body.version,'8.6.0');
 }
 assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_initialize_admin')).body,{p_initial_password:'admin1234'});
 
@@ -70,9 +71,10 @@ const userFailure=await handler(request('/auth/participant','POST',{employeeNo:'
 assert.equal(userFailure.status,401);assert.equal((await userFailure.json()).code,'LOGIN_FAILED');
 
 // Payment and game completion.
-const payment=await handler(request('/participant/pay','POST',{amount:100,description:'테스트 결제'},userBody.token));
+const paymentRequestId='web-test-payment-001';
+const payment=await handler(request('/participant/pay','POST',{amount:100,description:'테스트 결제',requestId:paymentRequestId},userBody.token));
 assert.equal(payment.status,200);
-assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_pay_credit')).body,{p_participant_id:participantId,p_amount:100,p_description:'테스트 결제'});
+assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_pay_credit')).body,{p_participant_id:participantId,p_amount:100,p_description:'테스트 결제',p_request_id:paymentRequestId});
 const invalidPayment=await handler(request('/participant/pay','POST',{amount:0},userBody.token));
 assert.equal(invalidPayment.status,400);assert.equal((await invalidPayment.json()).code,'INVALID_AMOUNT');
 const completion=await handler(request('/participant/complete-game','POST',{gameId},userBody.token));
@@ -111,6 +113,10 @@ const grant=await handler(request(`/admin/participants/${participantId}/credit`,
 assert.equal(grant.status,200);
 const password=await handler(request('/admin/password','POST',{password:'next1234'},adminBody.token));
 assert.equal(password.status,200);
+const changedPasswordLogin=await handler(request('/auth/admin','POST',{password:'next1234'}));
+assert.equal(changedPasswordLogin.status,200,'changed administrator password must authenticate');
+const oldPasswordLogin=await handler(request('/auth/admin','POST',{password:'admin1234'}));
+assert.equal(oldPasswordLogin.status,401,'bootstrap password must not remain a recovery login after change');
 const createGame=await handler(request('/admin/games','POST',{name:'새 게임',imageUrl:'/assets/game-default.svg'},adminBody.token));
 assert.equal(createGame.status,201);
 const deleteGame=await handler(request(`/admin/games/${gameId}`,'DELETE',undefined,adminBody.token));

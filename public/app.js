@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const VERSION = '8.5.0';
+  const VERSION = '8.6.0';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const views = { login: $('#login-view'), participant: $('#participant-view'), admin: $('#admin-view') };
@@ -8,7 +8,8 @@
   const state = {
     token: localStorage.getItem('zipMarketToken') || '', role: localStorage.getItem('zipMarketRole') || '',
     dashboard: null, admin: { participants: [], games: [] }, historyExpanded: false,
-    modal: null, pendingAmount: 0, scanner: null, qrLibraryLoading: null
+    modal: null, pendingAmount: 0, pendingDescription: '', paymentRequestId: '', paymentInFlight: false,
+    scanner: null, scannerStarting: false, scannerTargetGameId: '', scannerTargetGameName: ''
   };
 
   let toastTimer;
@@ -57,25 +58,36 @@
     const { readApiResponse } = globalThis.ZipMarketApiResponse || {};
     if (!readApiResponse) throw new Error('API 응답 처리 모듈을 불러오지 못했습니다. 새로고침해 주세요.');
 
+    const method = options.method || 'GET';
     const request = async (base) => {
       const hasBody = options.body !== undefined;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), Number(options.timeout || 20000));
       const headers = {
         accept: 'application/json',
         ...(hasBody ? { 'content-type': 'application/json' } : {}),
         ...(state.token ? { authorization: `Bearer ${state.token}` } : {})
       };
-      const res = await fetch(`${base}${path}`, {
-        method: options.method || 'GET',
-        headers,
-        cache: 'no-store',
-        body: hasBody ? JSON.stringify(options.body) : undefined
-      });
-      return readApiResponse(res);
+      try {
+        const res = await fetch(`${base}${path}`, {
+          method,
+          headers,
+          cache: 'no-store',
+          signal: controller.signal,
+          body: hasBody ? JSON.stringify(options.body) : undefined
+        });
+        return await readApiResponse(res);
+      } catch (error) {
+        if (error?.name === 'AbortError') throw new Error('서버 응답이 지연되고 있습니다. 잠시 후 사용내역을 확인해 주세요.');
+        throw error;
+      } finally { clearTimeout(timeout); }
     };
 
     try { return await request('/api'); }
     catch (error) {
-      if (error?.retryable || ['NON_JSON_RESPONSE', 'INVALID_API_SHAPE'].includes(error?.code) || /Failed to fetch/i.test(error?.message || '')) {
+      const safeToRetry = method === 'GET' || ['/auth/admin', '/auth/participant'].includes(path);
+      const routingFailure = error?.status === 404 || (error?.code === 'NON_JSON_RESPONSE' && error?.status === 404);
+      if (safeToRetry && routingFailure) {
         return request('/.netlify/functions/api');
       }
       throw error;
@@ -107,7 +119,12 @@
   async function closeModal(useBack = true) {
     if (!state.modal) return;
     const id = state.modal; const el = $(`#${id}`); state.modal = null; el?.classList.add('hidden');
-    if (id === 'scanner-modal') await stopScanner();
+    if (id === 'scanner-modal') {
+      await stopScanner();
+      state.scannerTargetGameId = '';
+      state.scannerTargetGameName = '';
+    }
+    if (id === 'payment-modal' && !state.paymentInFlight) resetPaymentButton();
     if (useBack && history.state?.modal === id) history.back();
   }
 
@@ -134,9 +151,18 @@
     const toggle = $('#history-toggle'); toggle.classList.toggle('hidden', list.length <= 5); toggle.classList.toggle('open', state.historyExpanded);
     $('span', toggle).textContent = state.historyExpanded ? '간단히 보기' : '나머지 내역도 보기';
   }
+  function gameImage(game) {
+    const key = `${game?.id || ''} ${game?.name || ''}`.toLowerCase();
+    if (/ping|탁구/.test(key)) return '/assets/game-pingpong.webp';
+    if (/balloon|풍선/.test(key)) return '/assets/game-balloon.webp';
+    return game?.image_url || '/assets/game-default.svg';
+  }
   function renderParticipantGames() {
     const games = state.dashboard?.games || []; const completed = new Set((state.dashboard?.completions || []).map(x => x.game_id));
-    $('#participant-games').innerHTML = games.length ? games.map(game => `<article class="image-card"><div class="image-frame"><img src="${escapeHtml(game.image_url || '/assets/game-default.svg')}" alt="${escapeHtml(game.name)}" onerror="this.src='/assets/game-default.svg'"></div><div class="card-body"><strong>${escapeHtml(game.name)}</strong><p class="${completed.has(game.id)?'status-complete':'status-pending'}">${completed.has(game.id)?'✓ 완료':'QR을 스캔해 완료하세요'}</p></div></article>`).join('') : '<div class="empty">등록된 게임이 없습니다.</div>';
+    $('#participant-games').innerHTML = games.length ? games.map(game => {
+      const done = completed.has(game.id);
+      return `<button class="image-card game-card-button${done ? ' is-complete' : ''}" data-game-id="${escapeHtml(game.id)}" data-game-name="${escapeHtml(game.name)}" data-completed="${done}" type="button"><div class="image-frame"><img src="${escapeHtml(gameImage(game))}" alt="${escapeHtml(game.name)}" onerror="this.src='/assets/game-default.svg'"></div><div class="card-body"><strong>${escapeHtml(game.name)}</strong><p class="${done?'status-complete':'status-pending'}">${done?'✓ 완료':'눌러서 완료 QR 스캔'}</p></div></button>`;
+    }).join('') : '<div class="empty">등록된 게임이 없습니다.</div>';
   }
 
   async function loadParticipant() {
@@ -170,10 +196,18 @@
   }
   function logout(){ clearSession(); showView('login'); history.pushState({zipMarket:true,view:'login'},'',location.pathname); toast('로그아웃했습니다.'); }
 
-  async function pay(amount, description) {
-    const data=await api('/participant/pay',{method:'POST',body:{amount,description}}); renderParticipant(data); toast(`${amount.toLocaleString()} C 결제가 완료되었습니다.`);
+  async function pay(amount, description, requestId) {
+    const data=await api('/participant/pay',{method:'POST',body:{amount,description,requestId}}); renderParticipant(data); toast(`${amount.toLocaleString()} C 결제가 완료되었습니다.`);
   }
-  function showPaymentConfirm(amount){state.pendingAmount=amount;$('#payment-modal-amount').textContent=`${amount.toLocaleString()} C`;openModal('payment-modal');}
+  function newPaymentRequestId(){return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,10)}`;}
+  function resetPaymentButton(){const button=$('#payment-confirm');if(!button)return;button.disabled=false;button.textContent='결제 확인';delete button.dataset.oldText;}
+  function showPaymentConfirm(amount,description=''){
+    if(state.paymentInFlight){toast('이전 결제 결과를 확인하고 있습니다. 잠시만 기다려 주세요.',true);return;}
+    const value=Number(amount);
+    if(!Number.isSafeInteger(value)||value<=0){toast('결제 금액이 올바르지 않습니다.',true);return;}
+    state.pendingAmount=value;state.pendingDescription=String(description||`${value}C 결제`);state.paymentRequestId=newPaymentRequestId();
+    $('#payment-modal-amount').textContent=`${value.toLocaleString()} C`;resetPaymentButton();openModal('payment-modal');
+  }
 
   async function loadQrLibrary(type) {
     const ready = type==='scan' ? window.Html5Qrcode : window.QRCode; if(ready) return ready;
@@ -182,21 +216,34 @@
     return type==='scan' ? window.Html5Qrcode : window.QRCode;
   }
   async function startScanner() {
+    if(state.scannerStarting||state.scanner?.isScanning)return;
+    state.scannerStarting=true;
     try {
       const Html5Qrcode=await loadQrLibrary('scan'); if(!Html5Qrcode) throw new Error('이 브라우저에서 QR 스캔을 시작할 수 없습니다.');
       if(state.scanner) await stopScanner(); state.scanner=new Html5Qrcode('qr-reader');
       await state.scanner.start({facingMode:'environment'},{fps:10,qrbox:(w,h)=>({width:Math.min(w,h)*.72,height:Math.min(w,h)*.72}),aspectRatio:1},handleQr,()=>{});
-      $('#camera-start').textContent='카메라 실행 중'; $('#camera-start').disabled=true;
-    } catch(error){toast(errorMessage(error),true);$('#scanner-help').textContent='카메라를 사용할 수 없습니다. 아래에서 QR 사진을 선택해 주세요.';}
+      $('#camera-start').classList.add('hidden');
+      $('#scanner-help').textContent='QR 코드를 카메라 중앙에 맞춰 주세요.';
+    } catch(error){toast(errorMessage(error),true);$('#scanner-help').textContent='카메라 권한을 허용한 뒤 아래 버튼으로 다시 시도해 주세요.';$('#camera-start').classList.remove('hidden');}
+    finally{state.scannerStarting=false;}
   }
-  async function stopScanner(){ if(state.scanner){try{if(state.scanner.isScanning)await state.scanner.stop();await state.scanner.clear();}catch{}state.scanner=null;}const b=$('#camera-start');if(b){b.textContent='카메라 시작';b.disabled=false;} }
-  async function scanFile(file){try{const Html5Qrcode=await loadQrLibrary('scan');const temp=new Html5Qrcode('qr-reader');const text=await temp.scanFile(file,true);await temp.clear();await handleQr(text);}catch(error){toast('QR을 읽지 못했습니다. 선명한 사진으로 다시 시도해 주세요.',true);}}
+  async function stopScanner(){ if(state.scanner){try{if(state.scanner.isScanning)await state.scanner.stop();await state.scanner.clear();}catch{}state.scanner=null;}state.scannerStarting=false;const b=$('#camera-start');if(b){b.textContent='카메라 다시 시도';b.disabled=false;b.classList.add('hidden');} }
+  async function openScannerFor(gameId='',gameName=''){
+    state.scannerTargetGameId=String(gameId||'');state.scannerTargetGameName=String(gameName||'');
+    $('#scanner-title').textContent=state.scannerTargetGameName?`${state.scannerTargetGameName} 완료 QR 스캔`:'QR 스캔';
+    $('#scanner-help').textContent='카메라를 시작하는 중입니다…';
+    openModal('scanner-modal');
+    await startScanner();
+  }
   async function handleQr(text){
-    try{let payload;try{payload=JSON.parse(text);}catch{throw new Error('ZIP! MARKET QR 코드가 아닙니다.');}if(payload.app!=='zip-market')throw new Error('ZIP! MARKET QR 코드가 아닙니다.');await closeModal(false);
-      if(payload.type==='payment'){showPaymentConfirm(Number(payload.amount));return;}if(payload.type==='game'){const data=await api('/participant/complete-game',{method:'POST',body:{gameId:payload.gameId}});renderParticipant(data);toast('게임 완료가 저장되었습니다.');showParticipantPage('games');return;}throw new Error('지원하지 않는 QR 코드입니다.');
+    try{const payload=globalThis.ZipMarketQr?.parse(text);if(!payload)throw new Error('ZIP! MARKET QR 코드가 아닙니다.');
+      if(state.scannerTargetGameId&&payload.type!=='game')throw new Error('선택한 게임의 완료 QR 코드를 스캔해 주세요.');
+      if(state.scannerTargetGameId&&String(payload.gameId)!==state.scannerTargetGameId)throw new Error(`${state.scannerTargetGameName||'선택한 게임'}의 QR 코드가 아닙니다.`);
+      await closeModal(false);
+      if(payload.type==='payment'){showPaymentConfirm(Number(payload.amount),payload.description);return;}if(payload.type==='game'){const data=await api('/participant/complete-game',{method:'POST',body:{gameId:String(payload.gameId)}});renderParticipant(data);toast('게임 완료와 크레딧 지급이 처리되었습니다.');showParticipantPage('games',false);return;}throw new Error('지원하지 않는 QR 코드입니다.');
     }catch(error){toast(errorMessage(error),true);}
   }
-  async function showQr(payload,title,description){try{const QRCode=await loadQrLibrary('display');$('#qr-display-title').textContent=title;$('#qr-display-description').textContent=description;const output=$('#qr-output');output.innerHTML='';new QRCode(output,{text:JSON.stringify(payload),width:256,height:256,colorDark:'#172233',colorLight:'#ffffff',correctLevel:window.QRCode?.CorrectLevel?.H});openModal('qr-display-modal');}catch(error){toast(errorMessage(error),true);}}
+  async function showQr(payload,title,description){try{const QRCode=await loadQrLibrary('display');const qrText=globalThis.ZipMarketQr?.serialize(payload);if(!qrText)throw new Error('QR 코드 정보를 만들지 못했습니다.');$('#qr-display-title').textContent=title;$('#qr-display-description').textContent=description;const output=$('#qr-output');output.innerHTML='';output.dataset.payload=qrText;new QRCode(output,{text:qrText,width:256,height:256,colorDark:'#172233',colorLight:'#ffffff',correctLevel:window.QRCode?.CorrectLevel?.H});openModal('qr-display-modal');}catch(error){toast(errorMessage(error),true);}}
 
   $('#participant-login-form').addEventListener('submit',participantLogin);$('#admin-login-form').addEventListener('submit',adminLogin);$('#open-admin-login').addEventListener('click',()=>openModal('admin-login-modal'));
   $$('.logout').forEach(b=>b.addEventListener('click',logout));$$('[data-close-modal]').forEach(b=>b.addEventListener('click',()=>closeModal()));$$('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)closeModal();}));
@@ -204,8 +251,9 @@
   $$('[data-go]').forEach(b=>b.addEventListener('click',()=>showParticipantPage(b.dataset.go)));$$('[data-back]').forEach(b=>b.addEventListener('click',()=>history.back()));
   $('#history-toggle').addEventListener('click',()=>{state.historyExpanded=!state.historyExpanded;renderTransactions();});
   $$('.payment-option').forEach(b=>b.addEventListener('click',()=>showPaymentConfirm(Number(b.dataset.amount))));
-  $('#payment-confirm').addEventListener('click',async e=>{const amount=state.pendingAmount;setBusy(e.currentTarget,true,'결제 중…');try{await pay(amount,`${amount}C 결제`);await closeModal();showParticipantPage('home');}catch(error){toast(errorMessage(error),true);}finally{setBusy(e.currentTarget,false);}});
-  $('#open-scanner').addEventListener('click',()=>openModal('scanner-modal'));$('#camera-start').addEventListener('click',startScanner);$('#qr-file').addEventListener('change',e=>{if(e.target.files?.[0])scanFile(e.target.files[0]);e.target.value='';});
+  $('#payment-confirm').addEventListener('click',async e=>{if(state.paymentInFlight)return;const amount=state.pendingAmount,description=state.pendingDescription||`${amount}C 결제`,requestId=state.paymentRequestId||newPaymentRequestId();state.paymentInFlight=true;setBusy(e.currentTarget,true,'결제 중…');try{await pay(amount,description,requestId);state.pendingAmount=0;state.pendingDescription='';state.paymentRequestId='';await closeModal();showParticipantPage('home');}catch(error){toast(errorMessage(error),true);}finally{state.paymentInFlight=false;setBusy(e.currentTarget,false);resetPaymentButton();}});
+  $('#open-scanner').addEventListener('click',()=>openScannerFor());$('#camera-start').addEventListener('click',startScanner);
+  $('#participant-games').addEventListener('click',e=>{const card=e.target.closest('.game-card-button');if(!card)return;if(card.dataset.completed==='true'){toast('이미 완료한 게임입니다.');return;}openScannerFor(card.dataset.gameId,card.dataset.gameName);});
   $$('[data-admin-tab]').forEach(b=>b.addEventListener('click',()=>switchAdminTab(b.dataset.adminTab)));
 
   $('#participant-create-form')?.addEventListener('submit',async event=>{

@@ -1,28 +1,26 @@
-# ZIP! MARKET v8.5 validation record
+# ZIP! MARKET v8.6 validation record
 
-## Strict suites
+## 자동 검증 범위
 
-- SQL structural/syntax checks
-- Parsed Netlify API ↔ Supabase RPC contract checks
-- Old/new transaction schema simulation with `kind NOT NULL`
-- Explicit initial-credit compatibility insert checks
-- Single registration success and invalid/duplicate errors
-- Atomic Excel success, invalid-row rollback, duplicate-in-file rollback, existing-employee/race rollback
-- Participant login after registration
-- Executable frontend `resetFormSafely` and Excel parser tests
-- `/api/health` and direct Function routing
-- Administrator and participant login success/failure
-- Payment and invalid amount
-- Games, rewards, creation, completion, and deletion
-- Participant child deletion order
-- QR and response-envelope compatibility
-- History navigation, modals, and transaction display
-- Jua/Pretendard fonts and responsive contain images
-- DOM references, supplied images, and JavaScript syntax
-- Clean archive extraction and complete rerun before delivery
+- SQL 구문 구조, 함수 본문, 괄호 및 안전한 search path
+- Netlify API ↔ Supabase RPC 이름·인수명·타입·반환형·권한 계약
+- `INITIAL_ADMIN_PASSWORD`가 변경된 관리자 비밀번호를 되돌리지 않는지 검사
+- 관리자 비밀번호 변경 후 새 비밀번호 성공·이전 비밀번호 실패 API 검사
+- 기존 문자형 게임 ID(`balloon`) 및 UUID형 QR 파서 검사
+- 게임 완료·보상·중복 완료 방지 트랜잭션 구조
+- 결제 고유 요청 ID 및 DB 멱등 처리 구조
+- 결제 오류/타임아웃 뒤 버튼 상태 복구 코드
+- 새 compact QR, 기존 JSON QR, URL QR 및 비 ZIP QR 거부
+- 사진 QR 입력 제거 및 카메라 자동 시작 진입
+- 게임 카드 클릭 스캐너 진입과 선택 게임 검증
+- 결제·게임 이미지 3:2 비율, `contain`, 모바일 1열 구조
+- 참가자 단일/Excel 등록, `kind NOT NULL` 호환, 원자적 롤백
+- 로그인, 대시보드, 결제, 게임, 참가자·게임 삭제, 라우팅, 응답 형식
+- 정적 리소스, DOM ID, 6개 제공 이미지, JavaScript 문법
+- 최종 ZIP 압축 해제 후 동일 테스트 재실행
 
-Expected error-path logs (`LOGIN_FAILED`, duplicate employee, invalid row, invalid amount, unauthorized, and not found) are intentional assertions, not test failures.
+`LOGIN_FAILED`, 중복 참가자, 잘못된 행/금액, 인증 없음, 404 로그는 실패 경로를 검증하는 의도된 출력입니다.
 
-## Production boundary
+## 운영 환경 경계
 
-The container does not possess production Supabase secrets. The exact production database cannot be mutated here. The repair SQL is idempotent, data-preserving, contains database-side catalog verification, and is accompanied by schema-compatibility simulation for the production `kind NOT NULL` failure shape.
+검증 환경에는 운영 Supabase 비밀값이 없으므로 운영 DB를 직접 변경하지 않습니다. 대신 복구 SQL은 데이터 삭제 명령을 포함하지 않고, 실행 마지막에 함수 시그니처·반환형·권한을 DB 카탈로그에서 자체 검증한 뒤 PostgREST 스키마 캐시를 새로고침합니다.

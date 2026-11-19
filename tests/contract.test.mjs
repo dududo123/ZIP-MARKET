@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [schema, api, app, parser, html, css, pkg, netlify, redirects] = await Promise.all([
+const [schema, api, app, parser, qr, html, css, pkg, netlify, redirects] = await Promise.all([
   readFile(new URL('../supabase/schema.sql', import.meta.url),'utf8'),
   readFile(new URL('../netlify/functions/api.mjs', import.meta.url),'utf8'),
   readFile(new URL('../public/app.js', import.meta.url),'utf8'),
   readFile(new URL('../public/api-response.js', import.meta.url),'utf8'),
+  readFile(new URL('../public/qr-payload.js', import.meta.url),'utf8'),
   readFile(new URL('../public/index.html', import.meta.url),'utf8'),
   readFile(new URL('../public/styles.css', import.meta.url),'utf8'),
   readFile(new URL('../package.json', import.meta.url),'utf8'),
@@ -21,7 +22,7 @@ const rpcContracts = {
   zip_market_admin_create_participants: ['p_participants'],
   zip_market_set_admin_password: ['p_password'],
   zip_market_grant_credit: ['p_participant_id','p_amount','p_description'],
-  zip_market_pay_credit: ['p_participant_id','p_amount','p_description'],
+  zip_market_pay_credit: ['p_participant_id','p_amount','p_description','p_request_id'],
   zip_market_complete_game: ['p_participant_id','p_game_id']
 };
 for (const [fn,args] of Object.entries(rpcContracts)) {
@@ -43,10 +44,13 @@ assert.ok(netlify.indexOf('from = "/api/*"') < netlify.indexOf('from = "/*"'),'A
 assert.match(redirects,/^\/api\/\*/m,'public redirect fallback missing');
 
 for (const endpoint of ['/auth/admin','/auth/participant','/participant/pay','/participant/complete-game','/admin/participants','/admin/games','/admin/password']) assert.ok(api.includes(endpoint),`missing endpoint ${endpoint}`);
-for (const feature of ['history-toggle','modal-close','qr-file','participant-search-reset','delete-participant','delete-game']) assert.ok(html.includes(feature)||app.includes(feature),`missing UI feature ${feature}`);
+for (const feature of ['history-toggle','modal-close','camera-start','participant-search-reset','delete-participant','delete-game','game-card-button']) assert.ok(html.includes(feature)||app.includes(feature),`missing UI feature ${feature}`);
+assert.ok(qr.includes('ZIPMARKET|PAY')&&qr.includes('ZIPMARKET|GAME'),'canonical QR codecs missing');
+assert.ok(!html.includes('qr-file')&&!app.includes('scanFile'),'photo QR upload must be removed');
 assert.ok(css.includes('object-fit:contain'),'responsive images must preserve full artwork');
 assert.ok(app.includes("popstate"),'internal browser back navigation missing');
 assert.ok(app.includes("slice(0,5)"),'five-item transaction collapse missing');
 assert.ok(app.includes('Html5Qrcode'),'iPhone-compatible QR scanner missing');
+assert.ok(app.includes('openScannerFor')&&app.includes("$('#open-scanner').addEventListener('click',()=>openScannerFor())"),'scanner must auto-start from its launch action');
 
 console.log('contract.test: all schema/API and feature contracts passed');
