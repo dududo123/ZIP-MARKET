@@ -1,1 +1,24 @@
-{"name":"zip-market-complete-v3","version":"3.0.0","private":true,"type":"module","scripts":{"build":"esbuild src/app.js --bundle --minify --format=iife --target=es2020 --outfile=public/app.js"},"dependencies":{"@supabase/supabase-js":"^2.49.1","bcryptjs":"^3.0.2","html5-qrcode":"^2.3.8","jose":"^6.0.8","qrcode":"^1.5.4"},"devDependencies":{"esbuild":"^0.25.0","netlify-cli":"^23.5.0"}}
+{
+  "name": "zip-market",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "npx netlify dev",
+    "check": "npm run build && node --check netlify/functions/api.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.47.10",
+    "bcryptjs": "^2.4.3",
+    "html5-qrcode": "^2.3.8",
+    "jsonwebtoken": "^9.0.2",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
