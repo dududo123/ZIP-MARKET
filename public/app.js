@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const VERSION = '8.2.0';
+  const VERSION = '8.3.0';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const views = { login: $('#login-view'), participant: $('#participant-view'), admin: $('#admin-view') };
@@ -26,20 +26,30 @@
   function formatDate(value) { try { return new Intl.DateTimeFormat('ko-KR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}).format(new Date(value)); } catch { return ''; } }
 
   async function api(path, options = {}) {
+    const { readApiResponse } = globalThis.ZipMarketApiResponse || {};
+    if (!readApiResponse) throw new Error('API 응답 처리 모듈을 불러오지 못했습니다. 새로고침해 주세요.');
+
     const request = async (base) => {
+      const hasBody = options.body !== undefined;
+      const headers = {
+        accept: 'application/json',
+        ...(hasBody ? { 'content-type': 'application/json' } : {}),
+        ...(state.token ? { authorization: `Bearer ${state.token}` } : {})
+      };
       const res = await fetch(`${base}${path}`, {
         method: options.method || 'GET',
-        headers: { 'content-type':'application/json', ...(state.token ? { authorization:`Bearer ${state.token}` } : {}) },
-        body: options.body === undefined ? undefined : JSON.stringify(options.body)
+        headers,
+        cache: 'no-store',
+        body: hasBody ? JSON.stringify(options.body) : undefined
       });
-      const text = await res.text(); let data;
-      try { data = text ? JSON.parse(text) : {}; } catch { throw new Error(`서버 응답을 읽을 수 없습니다. (${res.status})`); }
-      if (!res.ok) { const error = new Error(data.detail ? `${data.message} (${data.detail})` : data.message || '요청 실패'); error.code = data.code; throw error; }
-      return data;
+      return readApiResponse(res);
     };
+
     try { return await request('/api'); }
     catch (error) {
-      if (/서버 응답을 읽을 수 없습니다|Failed to fetch|404/.test(error.message)) return request('/.netlify/functions/api');
+      if (error?.retryable || ['NON_JSON_RESPONSE', 'INVALID_API_SHAPE'].includes(error?.code) || /Failed to fetch/i.test(error?.message || '')) {
+        return request('/.netlify/functions/api');
+      }
       throw error;
     }
   }
@@ -121,13 +131,13 @@
 
   async function participantLogin(event) {
     event.preventDefault(); const button = $('button[type=submit]', event.currentTarget); setBusy(button,true,'로그인 중…');
-    try { const data = await api('/auth/participant',{method:'POST',body:{employeeNo:$('#employee-no').value.trim(),password:$('#participant-password').value}}); saveSession('participant',data.token); renderParticipant(data); showView('participant'); showParticipantPage('home',false); history.pushState({zipMarket:true,view:'participant',page:'home'},'','#home'); }
+    try { const data = await api('/auth/participant',{method:'POST',body:{employeeNo:$('#employee-no').value.trim(),password:$('#participant-password').value}}); if(!data?.token||!data?.participant)throw new Error('사용자 로그인 응답 형식이 올바르지 않습니다.'); saveSession('participant',data.token); renderParticipant(data); showView('participant'); showParticipantPage('home',false); history.pushState({zipMarket:true,view:'participant',page:'home'},'','#home'); }
     catch(error){ toast(errorMessage(error),true); } finally { setBusy(button,false); }
   }
   async function adminLogin(event) {
     event.preventDefault(); const button = $('button[type=submit]',event.currentTarget); const password=$('#admin-password')?.value || ''; if(!password){toast('관리자 비밀번호를 입력해 주세요.',true);return;}
     setBusy(button,true,'로그인 중…');
-    try { const data=await api('/auth/admin',{method:'POST',body:{password}}); saveSession('admin',data.token); await closeModal(false); showView('admin'); await loadAdmin(); switchAdminTab('participants'); $('#admin-password').value=''; }
+    try { const data=await api('/auth/admin',{method:'POST',body:{password}}); if(!data?.token)throw new Error('관리자 로그인 응답에 인증 정보가 없습니다. API 배포 상태를 확인해 주세요.'); saveSession('admin',data.token); await closeModal(false); showView('admin'); await loadAdmin(); switchAdminTab('participants'); $('#admin-password').value=''; }
     catch(error){toast(errorMessage(error),true);} finally{setBusy(button,false);}
   }
   function logout(){ clearSession(); showView('login'); history.pushState({zipMarket:true,view:'login'},'',location.pathname); toast('로그아웃했습니다.'); }

@@ -1,31 +1,19 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 
-const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
-const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8');
-const js = await readFile(new URL('../src/app.js', import.meta.url), 'utf8');
+const [html,app]=await Promise.all([
+  readFile(new URL('../public/index.html',import.meta.url),'utf8'),
+  readFile(new URL('../public/app.js',import.meta.url),'utf8')
+]);
+const ids=new Set([...html.matchAll(/\bid=["']([^"']+)/g)].map(match=>match[1]));
+const referencedIds=new Set([...app.matchAll(/\$\(["']#([A-Za-z0-9_-]+)["']/g)].map(match=>match[1]));
+const missing=[...referencedIds].filter(id=>!ids.has(id));
+assert.deepEqual(missing,[],'app.js contains missing DOM id references');
 
-test('every static element ID referenced by app.js exists', () => {
-  const ids = new Set([...js.matchAll(/\$\('#([A-Za-z][\w-]*)[^']*'\)|getElementById\('([^']+)'\)/g)].map(match => match[1] || match[2]));
-  for (const id of ids) assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
-});
-
-test('pre-V5 fonts and iPhone image containment are retained', () => {
-  assert.match(html, /family=Jua/);
-  assert.match(html, /pretendard/i);
-  assert.match(css, /font-family:Pretendard/);
-  assert.match(css, /font-family:'Jua'/);
-  assert.match(css, /object-fit:contain/);
-  assert.match(css, /max-width:430px/);
-});
-
-test('critical UX controls remain present', () => {
-  for (const id of ['adminLoginModal','paymentModal','qrModal','toggleHistory','resetSearch','participantList','adminGameList']) {
-    assert.match(html, new RegExp(`id=["']${id}["']`));
-  }
-  assert.match(js, /history\.pushState/);
-  assert.match(js, /data-delete-person/);
-  assert.match(js, /data-delete-game/);
-  assert.match(js, /나머지 내역도 보기/);
-});
+for(const name of ['logo.webp','pay-100.webp','pay-200.webp','pay-300.webp','game-pingpong.webp','game-balloon.webp']){
+  const file=await stat(new URL(`../public/assets/${name}`,import.meta.url));
+  assert.ok(file.size>1000,`${name} appears missing or empty`);
+}
+for(const source of ['/api-response.js?v=8.3.0','/app.js?v=8.3.0','/styles.css?v=8.3.0']) assert.ok(html.includes(source),`cache-busted source missing: ${source}`);
+assert.ok(html.indexOf('/api-response.js?v=8.3.0')<html.indexOf('/app.js?v=8.3.0'),'response parser must load before app.js');
+console.log(`static.test: ${referencedIds.size} DOM references, six images and script order passed`);

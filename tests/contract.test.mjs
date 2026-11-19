@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-const [schema, api, app, html, css, pkg] = await Promise.all([
+const [schema, api, app, parser, html, css, pkg, netlify, redirects] = await Promise.all([
   readFile(new URL('../supabase/schema.sql', import.meta.url),'utf8'),
   readFile(new URL('../netlify/functions/api.mjs', import.meta.url),'utf8'),
   readFile(new URL('../public/app.js', import.meta.url),'utf8'),
+  readFile(new URL('../public/api-response.js', import.meta.url),'utf8'),
   readFile(new URL('../public/index.html', import.meta.url),'utf8'),
   readFile(new URL('../public/styles.css', import.meta.url),'utf8'),
-  readFile(new URL('../package.json', import.meta.url),'utf8')
+  readFile(new URL('../package.json', import.meta.url),'utf8'),
+  readFile(new URL('../netlify.toml', import.meta.url),'utf8'),
+  readFile(new URL('../public/_redirects', import.meta.url),'utf8')
 ]);
 
 const rpcContracts = {
@@ -30,6 +33,13 @@ assert.ok(schema.includes("notify pgrst, 'reload schema'"));
 assert.ok(!/^\s*drop\s+table/im.test(schema),'schema must not drop tables');
 assert.ok(!pkg.includes('"type": "module"'),'package must not recreate the v8.1 module conflict');
 assert.ok(!api.includes('@supabase/supabase-js'),'server must use direct REST without WebSocket dependency');
+assert.ok(api.includes('new Response('),'Function must create Web Response objects');
+assert.match(api,/export default async function handler\(request\)/,'modern Netlify default handler missing');
+assert.ok(!api.includes('statusCode,\n  headers:'),'legacy Function response envelope must not be returned');
+assert.ok(parser.includes('statusCode')&&parser.includes('NON_JSON_RESPONSE'),'frontend parser must unwrap legacy envelopes and detect HTML');
+assert.ok(app.includes('readApiResponse'),'app must use the verified response parser');
+assert.ok(netlify.indexOf('from = "/api/*"') < netlify.indexOf('from = "/*"'),'API redirect must precede SPA fallback');
+assert.match(redirects,/^\/api\/\*/m,'public redirect fallback missing');
 
 for (const endpoint of ['/auth/admin','/auth/participant','/participant/pay','/participant/complete-game','/admin/participants','/admin/games','/admin/password']) assert.ok(api.includes(endpoint),`missing endpoint ${endpoint}`);
 for (const feature of ['history-toggle','modal-close','qr-file','participant-search-reset','delete-participant','delete-game']) assert.ok(html.includes(feature)||app.includes(feature),`missing UI feature ${feature}`);
