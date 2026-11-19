@@ -4,4 +4,4 @@ await rm('dist', { recursive: true, force: true });
 await mkdir('dist', { recursive: true });
 await cp('public', 'dist', { recursive: true });
 await cp('src/app.js', 'dist/app.js');
-console.log('ZIP! MARKET v7 build complete.');
+console.log('ZIP! MARKET v8 build complete.');

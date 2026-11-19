@@ -43,20 +43,51 @@ function toast(message, kind = '') {
 }
 
 async function api(path, options = {}) {
-  const headers = { 'content-type':'application/json', ...(options.headers || {}) };
+  const headers = { 'content-type':'application/json', accept:'application/json', ...(options.headers || {}) };
   if (state.token) headers.authorization = `Bearer ${state.token}`;
-  const response = await fetch(`/api${path}`, { method: options.method || 'GET', headers, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
-  let data;
-  try { data = await response.json(); } catch { data = { message:`서버 응답을 읽지 못했습니다. (HTTP ${response.status})` }; }
+  const request = async base => {
+    let response;
+    try {
+      response = await fetch(`${base}${path}`, {
+        method: options.method || 'GET',
+        headers,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        cache: 'no-store'
+      });
+    } catch (cause) {
+      const error = new Error('서버에 연결하지 못했습니다. 네트워크와 Netlify 배포 상태를 확인해 주세요.');
+      error.code = 'NETWORK_ERROR'; error.detail = cause?.message || ''; throw error;
+    }
+    const text = await response.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : {}; } catch { data = null; }
+    return { response, data, text };
+  };
+
+  // /api 리다이렉트 설정이 배포에서 누락된 경우 Function의 직접 주소로 한 번 더 시도합니다.
+  let result = await request('/api');
+  if ((!result.data || result.response.status === 404) && !path.startsWith('/health')) {
+    result = await request('/.netlify/functions/api');
+  }
+  const { response, data, text } = result;
+  if (!data) {
+    const error = new Error(`서버가 JSON 대신 다른 응답을 보냈습니다. (HTTP ${response.status})`);
+    error.code = 'INVALID_SERVER_RESPONSE'; error.detail = text.slice(0,180); error.status = response.status; throw error;
+  }
   if (!response.ok || data.ok === false) {
-    const error = new Error(data.message || '요청을 처리하지 못했습니다.'); error.code = data.code; error.detail = data.detail; error.status = response.status; throw error;
+    const error = new Error(data.message || `요청을 처리하지 못했습니다. (HTTP ${response.status})`);
+    error.code = data.code; error.detail = data.detail; error.status = response.status; throw error;
   }
   return data;
 }
 function friendlyError(error) {
   const map = {
     ENV_MISSING:'Netlify 환경변수가 빠져 있습니다. /api/health의 detail을 확인하세요.',
-    DATABASE_ERROR:'Supabase 연결 또는 schema.sql 권한을 확인하세요.',
+    DATABASE_ERROR:'Supabase 연결 또는 테이블 권한을 확인하세요.',
+    SCHEMA_MISSING:'Supabase SQL Editor에서 이 프로젝트의 schema.sql 전체를 실행해 주세요.',
+    SUPABASE_UNREACHABLE:'Supabase에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.',
+    NETWORK_ERROR:'Netlify 서버에 연결하지 못했습니다. 네트워크와 배포 상태를 확인해 주세요.',
+    INVALID_SERVER_RESPONSE:'Netlify Function 응답 형식이 올바르지 않습니다.',
     LOGIN_FAILED:error.message,
     INSUFFICIENT_CREDIT:'크레딧이 부족합니다.', DUPLICATE_PAYMENT:'이미 사용한 결제 QR입니다.',
     ALREADY_COMPLETED:'이미 완료 보상을 받은 게임입니다.', TOKEN_EXPIRED:'로그인이 만료되었습니다. 다시 로그인해 주세요.',
@@ -115,18 +146,18 @@ function applyUserSnapshot(data) {
 }
 function gameImage(game) {
   const name = String(game.name || '').toLowerCase();
-  if (name.includes('탁구') || name.includes('핑퐁') || name.includes('ping')) return '/assets/game-pingpong.webp?v=7';
-  if (name.includes('풍선') || name.includes('balloon')) return '/assets/game-balloon.webp?v=7';
-  return game.image_url || '/assets/game-default.webp?v=7';
+  if (name.includes('탁구') || name.includes('핑퐁') || name.includes('ping')) return '/assets/game-pingpong.webp?v=8';
+  if (name.includes('풍선') || name.includes('balloon')) return '/assets/game-balloon.webp?v=8';
+  return game.image_url || '/assets/game-default.webp?v=8';
 }
 function renderUser() {
   const snapshot = state.user; if (!snapshot) return;
   $('#userName').textContent = snapshot.participant.name;
   $('#creditBalance').textContent = `${formatNumber(snapshot.participant.credits)} C`;
   const payments = [100,200,300];
-  $('#paymentCards').innerHTML = payments.map(amount => `<article class="image-card"><div class="image-frame"><img src="/assets/pay-${amount}.webp?v=7" alt="${amount} 크레딧 결제" width="900" height="600" loading="lazy"></div><div class="image-card-body"><div><h3>${formatNumber(amount)} C</h3><p>크레딧 결제</p></div><button class="primary" type="button" data-pay="${amount}">결제</button></div></article>`).join('');
+  $('#paymentCards').innerHTML = payments.map(amount => `<article class="image-card"><div class="image-frame"><img src="/assets/pay-${amount}.webp?v=8" alt="${amount} 크레딧 결제" width="900" height="600" loading="lazy"></div><div class="image-card-body"><div><h3>${formatNumber(amount)} C</h3><p>크레딧 결제</p></div><button class="primary" type="button" data-pay="${amount}">결제</button></div></article>`).join('');
   const completed = new Set(snapshot.completedGameIds);
-  $('#gameCards').innerHTML = snapshot.games.length ? snapshot.games.map(game => `<article class="image-card ${completed.has(game.id) ? 'completed' : ''}"><div class="image-frame"><img src="${escapeHtml(gameImage(game))}" alt="${escapeHtml(game.name)}" width="900" height="600" loading="lazy" onerror="this.src='/assets/game-default.webp?v=7'"></div><div class="image-card-body"><div><h3>${escapeHtml(game.name)}</h3><p>완료 보상 +${formatNumber(game.reward)} C</p></div>${completed.has(game.id) ? '<span class="completed-label">완료</span>' : '<button class="primary" type="button" data-open-scan="1">QR 스캔</button>'}</div></article>`).join('') : '<div class="empty-state">등록된 게임이 없습니다.</div>';
+  $('#gameCards').innerHTML = snapshot.games.length ? snapshot.games.map(game => `<article class="image-card ${completed.has(game.id) ? 'completed' : ''}"><div class="image-frame"><img src="${escapeHtml(gameImage(game))}" alt="${escapeHtml(game.name)}" width="900" height="600" loading="lazy" onerror="this.src='/assets/game-default.webp?v=8'"></div><div class="image-card-body"><div><h3>${escapeHtml(game.name)}</h3><p>완료 보상 +${formatNumber(game.reward)} C</p></div>${completed.has(game.id) ? '<span class="completed-label">완료</span>' : '<button class="primary" type="button" data-open-scan="1">QR 스캔</button>'}</div></article>`).join('') : '<div class="empty-state">등록된 게임이 없습니다.</div>';
   renderHistory();
 }
 function renderHistory() {

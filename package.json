@@ -1,13 +1,14 @@
 {
-  "name": "zip-market-v7-login-font-fix",
-  "version": "7.0.0",
+  "name": "zip-market-v8-login-repair",
+  "version": "8.0.0",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node --check src/app.js && node --check netlify/functions/api.mjs && node --check scripts/build.mjs"
+    "check": "node --check src/app.js && node --check netlify/functions/api.mjs && node --check scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs"
   }
 }
