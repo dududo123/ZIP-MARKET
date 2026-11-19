@@ -1,4 +1,4 @@
--- ZIP! MARKET v8.6.0 — SAFE SUPABASE EVENT STABILITY REPAIR
+-- ZIP! MARKET v8.7.0 — SAFE SUPABASE GAME/PASSWORD COMPATIBILITY REPAIR
 -- Run this entire file once in Supabase > SQL Editor > New query.
 -- It preserves rows. It never drops tables and never deletes participant, game,
 -- transaction, completion, or setting data. It only replaces ZIP! MARKET RPCs.
@@ -29,8 +29,9 @@ create table if not exists public.participants (
 
 create table if not exists public.games (
   id uuid primary key default gen_random_uuid(),
+  slug text,
   name text not null,
-  image_url text not null default '/assets/game-default.svg',
+  image_url text not null default '/assets/game-default.webp',
   reward integer not null default 100,
   created_at timestamptz not null default now()
 );
@@ -52,6 +53,7 @@ create table if not exists public.game_completions (
   id uuid primary key default gen_random_uuid(),
   participant_id uuid not null references public.participants(id) on delete cascade,
   game_id uuid not null references public.games(id) on delete cascade,
+  reward integer not null default 0,
   rewarded_amount integer not null default 0,
   created_at timestamptz not null default now(),
   completed_at timestamptz not null default now(),
@@ -70,9 +72,18 @@ alter table public.participants add column if not exists created_at timestamptz 
 alter table public.participants add column if not exists updated_at timestamptz default now();
 
 alter table public.games add column if not exists name text;
+alter table public.games add column if not exists slug text;
+alter table public.games add column if not exists title text;
 alter table public.games add column if not exists image_url text;
+alter table public.games add column if not exists image text;
 alter table public.games add column if not exists reward integer;
+alter table public.games add column if not exists points integer;
+alter table public.games add column if not exists active boolean;
+alter table public.games add column if not exists is_active boolean;
+alter table public.games add column if not exists deleted boolean;
+alter table public.games add column if not exists is_deleted boolean;
 alter table public.games add column if not exists created_at timestamptz default now();
+alter table public.games add column if not exists updated_at timestamptz default now();
 
 alter table public.transactions add column if not exists participant_id uuid;
 alter table public.transactions add column if not exists amount integer;
@@ -86,6 +97,7 @@ alter table public.transactions add column if not exists created_at timestamptz 
 
 alter table public.game_completions add column if not exists participant_id uuid;
 alter table public.game_completions add column if not exists game_id uuid;
+alter table public.game_completions add column if not exists reward integer;
 alter table public.game_completions add column if not exists rewarded_amount integer;
 alter table public.game_completions add column if not exists created_at timestamptz default now();
 alter table public.game_completions add column if not exists completed_at timestamptz default now();
@@ -118,10 +130,25 @@ update public.participants set credits = credit_balance where credits is null;
 update public.participants set created_at = now() where created_at is null;
 update public.participants set updated_at = now() where updated_at is null;
 
-update public.games set name = 'GAME' where name is null or btrim(name) = '';
-update public.games set image_url = '/assets/game-default.svg' where image_url is null or btrim(image_url) = '';
-update public.games set reward = 100 where reward is null or reward < 0;
+update public.games set name = coalesce(nullif(btrim(name), ''), nullif(btrim(title), ''), 'GAME') where name is null or btrim(name) = '';
+update public.games set title = coalesce(nullif(btrim(title), ''), name) where title is null or btrim(title) = '';
+update public.games
+   set image_url = '/assets/game-default.webp'
+ where image_url is null
+    or btrim(image_url) = ''
+    or lower(split_part(image_url, '?', 1)) ~ '/(game-)?default\.(svg|png|jpe?g|webp)$';
+update public.games set image = coalesce(nullif(btrim(image), ''), image_url) where image is null or btrim(image) = '';
+update public.games set reward = coalesce(reward, points, 100) where reward is null or reward < 0;
+update public.games set points = coalesce(points, reward, 100) where points is null or points < 0;
+update public.games set active = coalesce(active, is_active, true) where active is null;
+update public.games set is_active = coalesce(is_active, active, true) where is_active is null;
+update public.games set deleted = coalesce(deleted, is_deleted, false) where deleted is null;
+update public.games set is_deleted = coalesce(is_deleted, deleted, false) where is_deleted is null;
 update public.games set created_at = now() where created_at is null;
+update public.games set updated_at = coalesce(updated_at, created_at, now()) where updated_at is null;
+update public.games
+   set slug = 'game-' || substr(md5(id::text || ':' || name), 1, 12)
+ where slug is null or btrim(slug) = '';
 
 update public.transactions
    set kind = case
@@ -138,14 +165,20 @@ update public.transactions set description = coalesce(description, label, '') wh
 update public.transactions set label = coalesce(label, description, '') where label is null;
 update public.transactions set balance_after = 0 where balance_after is null;
 update public.transactions set created_at = now() where created_at is null;
-update public.game_completions set rewarded_amount = 0 where rewarded_amount is null;
+update public.game_completions set reward = coalesce(reward, rewarded_amount, 0) where reward is null;
+update public.game_completions set rewarded_amount = coalesce(rewarded_amount, reward, 0) where rewarded_amount is null;
 update public.game_completions set created_at = coalesce(created_at, completed_at, now()) where created_at is null;
 update public.game_completions set completed_at = coalesce(completed_at, created_at, now()) where completed_at is null;
 
 alter table public.participants alter column credit_balance set default 0;
 alter table public.participants alter column credits set default 0;
-alter table public.games alter column image_url set default '/assets/game-default.svg';
+alter table public.games alter column image_url set default '/assets/game-default.webp';
 alter table public.games alter column reward set default 100;
+alter table public.games alter column points set default 100;
+alter table public.games alter column active set default true;
+alter table public.games alter column is_active set default true;
+alter table public.games alter column deleted set default false;
+alter table public.games alter column is_deleted set default false;
 alter table public.transactions alter column type set default 'payment';
 alter table public.transactions alter column kind set default 'payment';
 alter table public.transactions alter column label set default '';
@@ -158,6 +191,9 @@ alter table public.transactions alter column description set not null;
 alter table public.transactions alter column balance_after set not null;
 alter table public.transactions alter column created_at set not null;
 alter table public.game_completions alter column rewarded_amount set default 0;
+alter table public.game_completions alter column reward set default 0;
+alter table public.game_completions alter column reward set not null;
+alter table public.game_completions alter column rewarded_amount set not null;
 alter table public.game_completions alter column completed_at set default now();
 
 create unique index if not exists participants_employee_no_uidx on public.participants(employee_no);
@@ -166,9 +202,78 @@ create index if not exists transactions_participant_created_idx on public.transa
 create unique index if not exists transactions_participant_reference_uidx on public.transactions(participant_id, reference) where reference is not null;
 create index if not exists game_completions_participant_idx on public.game_completions(participant_id);
 create unique index if not exists game_completions_participant_game_uidx on public.game_completions(participant_id, game_id);
+create index if not exists games_slug_idx on public.games(slug);
+
+-- Supply an ID default for both schema generations. Production v5/v6 used a
+-- text slug ID, while newer clean installs use UUID. The game-creation RPC also
+-- writes the ID explicitly; this default protects any remaining direct insert.
+do $$
+declare
+  v_udt text;
+begin
+  select udt_name into v_udt
+    from information_schema.columns
+   where table_schema = 'public' and table_name = 'games' and column_name = 'id';
+  if v_udt = 'uuid' then
+    execute 'alter table public.games alter column id set default gen_random_uuid()';
+  elsif v_udt in ('text', 'varchar', 'bpchar') then
+    execute $sql$alter table public.games alter column id set default ('game-' || replace(gen_random_uuid()::text, '-', ''))$sql$;
+  end if;
+end;
+$$;
+
+create or replace function public.zip_market_sync_game_compat()
+returns trigger
+language plpgsql
+set search_path = public, extensions, pg_catalog
+as $$
+begin
+  new.name := coalesce(nullif(btrim(new.name), ''), nullif(btrim(new.title), ''), 'GAME');
+  new.title := coalesce(nullif(btrim(new.title), ''), new.name);
+  if new.image_url is null or btrim(new.image_url) = ''
+     or lower(split_part(new.image_url, '?', 1)) ~ '/(game-)?default\.(svg|png|jpe?g|webp)$' then
+    new.image_url := '/assets/game-default.webp';
+  end if;
+  new.image := coalesce(nullif(btrim(new.image), ''), new.image_url);
+  new.reward := greatest(coalesce(new.reward, new.points, 100), 0);
+  new.points := greatest(coalesce(new.points, new.reward, 100), 0);
+  new.active := coalesce(new.active, new.is_active, true);
+  new.is_active := coalesce(new.is_active, new.active, true);
+  new.deleted := coalesce(new.deleted, new.is_deleted, false);
+  new.is_deleted := coalesce(new.is_deleted, new.deleted, false);
+  new.slug := coalesce(nullif(btrim(new.slug), ''), 'game-' || substr(md5(coalesce(new.id::text, '') || ':' || new.name), 1, 12));
+  new.created_at := coalesce(new.created_at, now());
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists zip_market_game_compat_trg on public.games;
+create trigger zip_market_game_compat_trg
+before insert or update on public.games
+for each row execute function public.zip_market_sync_game_compat();
+
+create or replace function public.zip_market_sync_game_completion_compat()
+returns trigger
+language plpgsql
+set search_path = public, extensions, pg_catalog
+as $$
+begin
+  new.reward := greatest(coalesce(new.reward, new.rewarded_amount, 0), 0);
+  new.rewarded_amount := greatest(coalesce(new.rewarded_amount, new.reward, 0), 0);
+  new.created_at := coalesce(new.created_at, new.completed_at, now());
+  new.completed_at := coalesce(new.completed_at, new.created_at, now());
+  return new;
+end;
+$$;
+
+drop trigger if exists zip_market_game_completion_compat_trg on public.game_completions;
+create trigger zip_market_game_completion_compat_trg
+before insert or update on public.game_completions
+for each row execute function public.zip_market_sync_game_completion_compat();
 
 -- Synchronize all known transaction column generations. This trigger protects
--- old Functions and future direct inserts as well as the v8.6 RPCs.
+-- old Functions and future direct inserts as well as the v8.7 RPCs.
 create or replace function public.zip_market_sync_transaction_compat()
 returns trigger
 language plpgsql
@@ -246,6 +351,7 @@ drop function if exists public.zip_market_set_admin_password(text);
 drop function if exists public.zip_market_grant_credit(uuid, integer, text);
 drop function if exists public.zip_market_pay_credit(uuid, integer, text);
 drop function if exists public.zip_market_pay_credit(uuid, integer, text, text);
+drop function if exists public.zip_market_admin_create_game(text, text, integer);
 drop function if exists public.zip_market_complete_game(uuid, uuid);
 drop function if exists public.zip_market_complete_game(uuid, text);
 
@@ -574,6 +680,94 @@ begin
 end;
 $$;
 
+create function public.zip_market_admin_create_game(
+  p_name text,
+  p_image_url text,
+  p_reward integer
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_catalog
+as $$
+declare
+  v_name text := btrim(coalesce(p_name, ''));
+  v_image_url text := btrim(coalesce(p_image_url, ''));
+  v_reward integer := coalesce(p_reward, 100);
+  v_slug_base text;
+  v_slug text;
+  v_id_udt text;
+  v_id_text text;
+  v_next_number bigint;
+  v_counter integer := 1;
+  v_payload jsonb;
+  v_game public.games%rowtype;
+begin
+  if v_name = '' then raise exception 'GAME_NAME_REQUIRED' using errcode = '22023'; end if;
+  if v_reward < 0 then raise exception 'INVALID_GAME_REWARD' using errcode = '22023'; end if;
+
+  -- Serialize equal names so two concurrent administrator requests cannot make
+  -- duplicate games even on a legacy database without a case-insensitive index.
+  perform pg_advisory_xact_lock(hashtextextended('zip-market-game-name:' || lower(v_name), 0));
+  if exists (select 1 from public.games where lower(btrim(name)) = lower(v_name)) then
+    raise exception 'GAME_NAME_ALREADY_EXISTS' using errcode = '23505';
+  end if;
+
+  if v_image_url = ''
+     or lower(split_part(v_image_url, '?', 1)) ~ '/(game-)?default\.(svg|png|jpe?g|webp)$' then
+    v_image_url := '/assets/game-default.webp';
+  end if;
+
+  v_slug_base := trim(both '-' from regexp_replace(lower(v_name), '[^a-z0-9]+', '-', 'g'));
+  if v_slug_base = '' then v_slug_base := 'game'; end if;
+  v_slug_base := left(v_slug_base, 40) || '-' || substr(md5(lower(v_name)), 1, 8);
+  v_slug := v_slug_base;
+  while exists (select 1 from public.games where slug = v_slug or id::text = v_slug) loop
+    v_counter := v_counter + 1;
+    v_slug := v_slug_base || '-' || v_counter::text;
+  end loop;
+
+  select udt_name into v_id_udt
+    from information_schema.columns
+   where table_schema = 'public' and table_name = 'games' and column_name = 'id';
+  if v_id_udt = 'uuid' then
+    v_id_text := gen_random_uuid()::text;
+  elsif v_id_udt in ('int2', 'int4', 'int8', 'numeric') then
+    perform pg_advisory_xact_lock(hashtextextended('zip-market-game-numeric-id', 0));
+    execute 'select coalesce(max(id::bigint), 0) + 1 from public.games' into v_next_number;
+    v_id_text := v_next_number::text;
+  else
+    v_id_text := v_slug;
+  end if;
+
+  v_payload := jsonb_build_object(
+    'id', v_id_text,
+    'slug', v_slug,
+    'name', v_name,
+    'title', v_name,
+    'image_url', v_image_url,
+    'image', v_image_url,
+    'reward', v_reward,
+    'points', v_reward,
+    'active', true,
+    'is_active', true,
+    'deleted', false,
+    'is_deleted', false,
+    'created_at', now(),
+    'updated_at', now()
+  );
+
+  insert into public.games
+  select (jsonb_populate_record(null::public.games, v_payload)).*
+  returning * into v_game;
+
+  return to_jsonb(v_game) || jsonb_build_object('publicId', coalesce(v_game.slug, v_game.id::text));
+exception
+  when unique_violation then
+    raise exception 'GAME_NAME_ALREADY_EXISTS' using errcode = '23505';
+end;
+$$;
+
 create function public.zip_market_complete_game(
   p_participant_id uuid,
   p_game_id text
@@ -587,27 +781,34 @@ declare
   v_game public.games%rowtype;
   v_reward integer;
   v_balance integer;
-  v_inserted integer;
+  v_person public.participants%rowtype;
 begin
   -- Legacy installations use readable text IDs such as "balloon", while new
   -- installations use UUIDs. Comparing as text and inserting v_game.id keeps
   -- both schemas valid without converting or deleting existing game rows.
   select * into v_game
-    from public.games where id::text = btrim(p_game_id)
+    from public.games
+   where id::text = btrim(p_game_id)
+      or lower(slug) = lower(btrim(p_game_id))
     limit 1;
   if not found then raise exception 'GAME_NOT_FOUND' using errcode = 'P0002'; end if;
   v_reward := greatest(coalesce(v_game.reward, 0), 0);
 
-  perform 1 from public.participants where id = p_participant_id for update;
-  if not found then raise exception 'PARTICIPANT_NOT_FOUND' using errcode = 'P0002'; end if;
+  select * into v_person from public.participants where id = p_participant_id for update;
+  if v_person.id is null then raise exception 'PARTICIPANT_NOT_FOUND' using errcode = 'P0002'; end if;
+
+  if exists (
+    select 1 from public.game_completions
+     where participant_id = p_participant_id and game_id = v_game.id
+  ) then
+    raise exception 'ALREADY_COMPLETED' using errcode = '23505';
+  end if;
 
   insert into public.game_completions(
-    participant_id, game_id, rewarded_amount, created_at, completed_at
+    participant_id, game_id, reward, rewarded_amount, created_at, completed_at
   ) values (
-    p_participant_id, v_game.id, v_reward, now(), now()
-  ) on conflict (participant_id, game_id) do nothing;
-  get diagnostics v_inserted = row_count;
-  if v_inserted = 0 then raise exception 'ALREADY_COMPLETED' using errcode = '23505'; end if;
+    p_participant_id, v_game.id, v_reward, v_reward, now(), now()
+  );
 
   update public.participants
      set credit_balance = credit_balance + v_reward,
@@ -621,7 +822,23 @@ begin
     values (p_participant_id, v_reward, 'game', 'adjustment', v_game.name || ' 완료 보상', v_game.name || ' 완료 보상', v_balance, 'game:' || v_game.id::text, now());
   end if;
 
-  return jsonb_build_object('ok', true, 'gameId', v_game.id::text, 'reward', v_reward, 'balance', v_balance);
+  select * into v_person from public.participants where id = p_participant_id;
+  return jsonb_build_object(
+    'ok', true,
+    'gameId', v_game.id::text,
+    'gameSlug', v_game.slug,
+    'reward', v_reward,
+    'balance', v_balance,
+    'participant', jsonb_build_object(
+      'id', v_person.id,
+      'employee_no', v_person.employee_no,
+      'name', v_person.name,
+      'credit_balance', v_person.credit_balance
+    )
+  );
+exception
+  when unique_violation then
+    raise exception 'ALREADY_COMPLETED' using errcode = '23505';
 end;
 $$;
 
@@ -662,6 +879,7 @@ revoke all on function public.zip_market_admin_create_participants(jsonb) from p
 revoke all on function public.zip_market_set_admin_password(text) from public, anon, authenticated;
 revoke all on function public.zip_market_grant_credit(uuid, integer, text) from public, anon, authenticated;
 revoke all on function public.zip_market_pay_credit(uuid, integer, text, text) from public, anon, authenticated;
+revoke all on function public.zip_market_admin_create_game(text, text, integer) from public, anon, authenticated;
 revoke all on function public.zip_market_complete_game(uuid, text) from public, anon, authenticated;
 revoke all on function public.zip_auth_admin(text, text) from public, anon, authenticated;
 revoke all on function public.zip_auth_participant(text, text) from public, anon, authenticated;
@@ -674,12 +892,13 @@ grant execute on function public.zip_market_admin_create_participants(jsonb) to 
 grant execute on function public.zip_market_set_admin_password(text) to service_role;
 grant execute on function public.zip_market_grant_credit(uuid, integer, text) to service_role;
 grant execute on function public.zip_market_pay_credit(uuid, integer, text, text) to service_role;
+grant execute on function public.zip_market_admin_create_game(text, text, integer) to service_role;
 grant execute on function public.zip_market_complete_game(uuid, text) to service_role;
 grant execute on function public.zip_auth_admin(text, text) to service_role;
 grant execute on function public.zip_auth_participant(text, text) to service_role;
 
 insert into public.app_settings(key, value, updated_at)
-values ('schema_version', '8.6.0', now())
+values ('schema_version', '8.7.0', now())
 on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at;
 
 -- ---------------------------------------------------------------------------
@@ -701,6 +920,7 @@ begin
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
+    ('public.zip_market_admin_create_game(text,text,integer)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where to_regprocedure(signature) is null;
@@ -716,6 +936,7 @@ begin
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
+    ('public.zip_market_admin_create_game(text,text,integer)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where pg_get_function_result(to_regprocedure(signature)) <> 'jsonb';
@@ -731,12 +952,38 @@ begin
     ('public.zip_market_set_admin_password(text)'),
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
+    ('public.zip_market_admin_create_game(text,text,integer)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where not has_function_privilege('service_role', to_regprocedure(signature), 'EXECUTE')
      or has_function_privilege('anon', to_regprocedure(signature), 'EXECUTE')
      or has_function_privilege('authenticated', to_regprocedure(signature), 'EXECUTE');
   if v_bad_grant is not null then raise exception 'ZIP_MARKET_RPC_PRIVILEGE_MISMATCH: %', v_bad_grant; end if;
+
+  if not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'game_completions'
+       and column_name = 'reward' and is_nullable = 'NO'
+  ) or not exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'game_completions'
+       and column_name = 'rewarded_amount' and is_nullable = 'NO'
+  ) then
+    raise exception 'ZIP_MARKET_GAME_COMPLETION_COLUMNS_INVALID';
+  end if;
+
+  if exists (
+    select 1 from public.games
+     where image_url is null or btrim(image_url) = ''
+        or lower(split_part(image_url, '?', 1)) ~ '/(game-)?default\.(svg|png|jpe?g)$'
+  ) then
+    raise exception 'ZIP_MARKET_STALE_DEFAULT_GAME_ASSET';
+  end if;
+
+  if not exists (select 1 from pg_trigger where tgname = 'zip_market_game_compat_trg' and not tgisinternal)
+     or not exists (select 1 from pg_trigger where tgname = 'zip_market_game_completion_compat_trg' and not tgisinternal) then
+    raise exception 'ZIP_MARKET_GAME_COMPAT_TRIGGER_MISSING';
+  end if;
 end;
 $$;
 
@@ -766,6 +1013,7 @@ where n.nspname = 'public'
     'zip_market_set_admin_password',
     'zip_market_grant_credit',
     'zip_market_pay_credit',
+    'zip_market_admin_create_game',
     'zip_market_complete_game'
   )
 order by p.proname;

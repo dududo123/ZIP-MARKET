@@ -25,7 +25,7 @@ assert.ok(app.includes("payload.type==='payment'")&&app.includes("payload.type==
 assert.ok(app.includes('game-qr')&&app.includes('delete-game'),'game QR/delete controls missing');
 assert.ok(app.includes('game-card-button')&&app.includes('openScannerFor(card.dataset.gameId'),'game card must launch its QR scanner');
 assert.ok(api.includes("'/participant/complete-game'")&&api.includes("'/admin/games'"),'game API routes missing');
-assert.match(schema,/create function public\.zip_market_complete_game[\s\S]*on conflict \(participant_id, game_id\) do nothing/i,'duplicate-safe game completion missing');
+assert.match(schema,/create function public\.zip_market_complete_game[\s\S]*ALREADY_COMPLETED[\s\S]*when unique_violation[\s\S]*ALREADY_COMPLETED/i,'duplicate-safe game completion missing');
 
 // Participant deletion and dependent cleanup.
 const completionDelete=api.indexOf('game_completions?participant_id=eq.');
@@ -53,7 +53,7 @@ assert.match(css,/@media\(max-width:390px\)/i,'small iPhone breakpoint missing')
 assert.match(css,/\.image-card-grid\{[^}]*grid-template-columns/i,'responsive image grid missing');
 assert.match(css,/\.image-frame\{[^}]*aspect-ratio:3\/2/i,'image frame must follow artwork ratio instead of fixed height');
 
-for(const name of ['logo.webp','pay-100.webp','pay-200.webp','pay-300.webp','game-pingpong.webp','game-balloon.webp']){
+for(const name of ['logo.webp','pay-100.webp','pay-200.webp','pay-300.webp','game-pingpong.webp','game-balloon.webp','game-default.webp']){
   const file=await stat(new URL(`../public/assets/${name}`,import.meta.url));
   assert.ok(file.size>1000,`${name} appears empty`);
   assert.ok(html.includes(`/assets/${name}`)||name.startsWith('game-'),`${name} is not referenced`);

@@ -1,6 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-const VERSION = '8.6.0';
+const VERSION = '8.7.0';
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -40,6 +40,7 @@ const friendlyDatabaseError = (error) => {
   }
   if (/INSUFFICIENT_CREDIT/i.test(detail)) return new ApiError(409, 'INSUFFICIENT_CREDIT', '크레딧이 부족합니다.', detail);
   if (/ALREADY_COMPLETED|game_completions_participant_game/i.test(detail)) return new ApiError(409, 'ALREADY_COMPLETED', '이미 완료한 게임입니다.', detail);
+  if (/GAME_NAME_ALREADY_EXISTS/i.test(detail)) return new ApiError(409, 'GAME_NAME_ALREADY_EXISTS', '같은 이름의 게임이 이미 있습니다.', detail);
   if (/GAME_NOT_FOUND/i.test(detail)) return new ApiError(404, 'GAME_NOT_FOUND', '게임을 찾을 수 없습니다.', detail);
   if (/PARTICIPANT_NOT_FOUND/i.test(detail)) return new ApiError(404, 'PARTICIPANT_NOT_FOUND', '참가자를 찾을 수 없습니다.', detail);
   return error;
@@ -151,7 +152,7 @@ async function health() {
     adminCreatedNow: Boolean(initialized?.createdNow),
     transport: 'direct-rest',
     runtime: 'netlify-modern-response',
-    schema: 'zip-market-v8.6',
+    schema: 'zip-market-v8.7',
     version: VERSION
   };
 }
@@ -161,7 +162,7 @@ async function participantDashboard(participantId) {
   const [people, transactions, games, completions] = await Promise.all([
     query('participants', `select=id,employee_no,name,credit_balance,created_at&id=eq.${id}&limit=1`),
     query('transactions', `select=id,amount,type,description,balance_after,created_at&participant_id=eq.${id}&order=created_at.desc&limit=100`),
-    query('games', 'select=id,name,image_url,created_at&order=created_at.asc'),
+    query('games', 'select=id,slug,name,image_url,reward,created_at&order=created_at.asc'),
     query('game_completions', `select=game_id,completed_at&participant_id=eq.${id}`)
   ]);
   if (!people?.[0]) throw new ApiError(404, 'PARTICIPANT_NOT_FOUND', '참가자를 찾을 수 없습니다.');
@@ -174,7 +175,7 @@ async function adminDashboard(search = '') {
     : '';
   const [participants, games] = await Promise.all([
     query('participants', `select=id,employee_no,name,credit_balance,created_at&order=created_at.desc${filter}`),
-    query('games', 'select=id,name,image_url,created_at&order=created_at.asc')
+    query('games', 'select=id,slug,name,image_url,reward,created_at&order=created_at.asc')
   ]);
   return { participants: participants || [], games: games || [] };
 }
@@ -317,9 +318,13 @@ async function route(request) {
   if (method === 'POST' && path === '/admin/games') {
     const name = String(body.name || '').trim();
     if (!name) throw new ApiError(400, 'GAME_NAME_REQUIRED', '게임 이름을 입력해 주세요.');
-    const imageUrl = String(body.imageUrl || '/assets/game-default.svg').trim();
-    const data = await supabase('games?select=id,name,image_url,created_at', { method: 'POST', prefer: 'return=representation', body: { name, image_url: imageUrl } });
-    return response(201, { ok: true, game: data?.[0] });
+    const imageUrl = String(body.imageUrl || '/assets/game-default.webp').trim() || '/assets/game-default.webp';
+    const reward = Number(body.reward ?? 100);
+    if (!Number.isInteger(reward) || reward < 0) throw new ApiError(400, 'INVALID_GAME_REWARD', '게임 보상은 0 이상의 정수여야 합니다.');
+    try {
+      const game = normalizeRpcResult(await rpc('zip_market_admin_create_game', { p_name: name, p_image_url: imageUrl, p_reward: reward }));
+      return response(201, { ok: true, game });
+    } catch (error) { throw friendlyDatabaseError(error); }
   }
 
   const gameDelete = path.match(/^\/admin\/games\/([^/]{1,200})$/i);

@@ -1,10 +1,7 @@
-# Supabase application order
+# Supabase 적용 순서
 
-Use **one** of these files, not both:
+- 기존 ZIP! MARKET 운영 DB: `schema-repair.sql` 전체 실행
+- 빈 신규 DB: `schema.sql` 전체 실행
+- 두 파일을 연속 실행할 필요는 없습니다. 내용은 동일한 멱등 계약이며 첫 줄의 용도 설명만 다릅니다.
 
-- Existing ZIP! MARKET database: run `schema-repair.sql`.
-- Empty/new database: run `schema.sql`.
-
-Both contain the same audited idempotent database contract. The repair file is named separately so an operator can clearly select it for the current production database.
-
-Run the selected file in a new Supabase SQL Editor query, execute the entire file, and verify the final `schema_version` plus nine RPC rows before deploying Netlify.
+Supabase → SQL Editor → New query에서 선택한 파일 전체를 실행하세요. 마지막 결과에서 `schema_version = 8.7.0`과 10개 RPC 행을 확인한 다음 Netlify를 배포합니다.

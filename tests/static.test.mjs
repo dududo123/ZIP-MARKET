@@ -10,10 +10,10 @@ const referencedIds=new Set([...app.matchAll(/\$\(["']#([A-Za-z0-9_-]+)["']/g)].
 const missing=[...referencedIds].filter(id=>!ids.has(id));
 assert.deepEqual(missing,[],'app.js contains missing DOM id references');
 
-for(const name of ['logo.webp','pay-100.webp','pay-200.webp','pay-300.webp','game-pingpong.webp','game-balloon.webp']){
+for(const name of ['logo.webp','pay-100.webp','pay-200.webp','pay-300.webp','game-pingpong.webp','game-balloon.webp','game-default.webp']){
   const file=await stat(new URL(`../public/assets/${name}`,import.meta.url));
   assert.ok(file.size>1000,`${name} appears missing or empty`);
 }
-for(const source of ['/api-response.js?v=8.6.0','/qr-payload.js?v=8.6.0','/app.js?v=8.6.0','/styles.css?v=8.6.0']) assert.ok(html.includes(source),`cache-busted source missing: ${source}`);
-assert.ok(html.indexOf('/api-response.js?v=8.6.0')<html.indexOf('/qr-payload.js?v=8.6.0')&&html.indexOf('/qr-payload.js?v=8.6.0')<html.indexOf('/app.js?v=8.6.0'),'response and QR parsers must load before app.js');
-console.log(`static.test: ${referencedIds.size} DOM references, six images and script order passed`);
+for(const source of ['/api-response.js?v=8.7.0','/qr-payload.js?v=8.7.0','/app.js?v=8.7.0','/styles.css?v=8.7.0']) assert.ok(html.includes(source),`cache-busted source missing: ${source}`);
+assert.ok(html.indexOf('/api-response.js?v=8.7.0')<html.indexOf('/qr-payload.js?v=8.7.0')&&html.indexOf('/qr-payload.js?v=8.7.0')<html.indexOf('/app.js?v=8.7.0'),'response and QR parsers must load before app.js');
+console.log(`static.test: ${referencedIds.size} DOM references, seven images and script order passed`);

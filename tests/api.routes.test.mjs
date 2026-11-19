@@ -10,6 +10,7 @@ const gameId='balloon';
 const calls=[];
 let participantAuth = new Map([['TEST001','1234']]);
 let adminPassword='admin1234';
+const createdGameNames=new Set();
 const jsonResponse=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'content-type':'application/json'}});
 globalThis.fetch=async(url,options={})=>{
   const body=options.body?JSON.parse(options.body):null;
@@ -22,7 +23,7 @@ globalThis.fetch=async(url,options={})=>{
     return jsonResponse({authenticated:false});
   }
   if(u.endsWith('/rpc/zip_market_pay_credit')) return jsonResponse({ok:true,balance:900});
-  if(u.endsWith('/rpc/zip_market_complete_game')) return jsonResponse({ok:true,gameId,reward:100,balance:1100});
+  if(u.endsWith('/rpc/zip_market_complete_game')) return jsonResponse({ok:true,gameId,reward:100,balance:1100,participant:{id:participantId,employee_no:'TEST001',name:'테스트',credit_balance:1100}});
   if(u.endsWith('/rpc/zip_market_grant_credit')) return jsonResponse({ok:true,balance:1100});
   if(u.endsWith('/rpc/zip_market_admin_create_participant')) { if(participantAuth.has(body.p_employee_no)) return jsonResponse({code:'23505',message:'EMPLOYEE_NO_ALREADY_EXISTS'},409); participantAuth.set(body.p_employee_no,body.p_password); return jsonResponse({id:participantId,employee_no:body.p_employee_no,name:body.p_name,credit_balance:body.p_initial_credit}); }
   if(u.endsWith('/rpc/zip_market_admin_create_participants')) {
@@ -33,8 +34,12 @@ globalThis.fetch=async(url,options={})=>{
     return jsonResponse({createdCount:rows.length,results:rows.map((row,index)=>({row:index+1,employeeNo:row.employeeNo,participant:{employee_no:row.employeeNo}}))});
   }
   if(u.endsWith('/rpc/zip_market_set_admin_password')) {adminPassword=body.p_password;return jsonResponse({updated:true});}
+  if(u.endsWith('/rpc/zip_market_admin_create_game')) {
+    if(createdGameNames.has(body.p_name.toLowerCase()))return jsonResponse({code:'23505',message:'GAME_NAME_ALREADY_EXISTS'},409);
+    createdGameNames.add(body.p_name.toLowerCase());
+    return jsonResponse({id:'new-game-9f25a1bc',slug:'new-game-9f25a1bc',name:body.p_name,image_url:body.p_image_url,reward:body.p_reward});
+  }
   if((options.method||'GET')==='DELETE') return new Response(null,{status:204});
-  if((options.method||'GET')==='POST'&&u.includes('/games?')) return jsonResponse([{id:gameId,name:body.name,image_url:body.image_url}],201);
   if(u.includes('/participants?')) return jsonResponse([{id:participantId,employee_no:'TEST001',name:'테스트',credit_balance:1000,created_at:'2026-01-01T00:00:00Z'}]);
   if(u.includes('/transactions?')) return jsonResponse([{id:'t1',amount:-100,type:'payment',description:'테스트 결제',balance_after:900,created_at:'2026-01-01T00:00:00Z'}]);
   if(u.includes('/games?')) return jsonResponse([{id:gameId,name:'풍선 게임',image_url:'/assets/game-balloon.webp'}]);
@@ -52,7 +57,7 @@ const request=(path,method='GET',body,token,direct=false)=>new Request(
 for (const direct of [false,true]) {
   const res=await handler(request('/health','GET',undefined,undefined,direct));
   assert.ok(res instanceof Response);assert.equal(res.status,200);
-  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.6');assert.equal(body.version,'8.6.0');
+  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.7');assert.equal(body.version,'8.7.0');
 }
 assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_initialize_admin')).body,{p_initial_password:'admin1234'});
 
@@ -117,8 +122,11 @@ const changedPasswordLogin=await handler(request('/auth/admin','POST',{password:
 assert.equal(changedPasswordLogin.status,200,'changed administrator password must authenticate');
 const oldPasswordLogin=await handler(request('/auth/admin','POST',{password:'admin1234'}));
 assert.equal(oldPasswordLogin.status,401,'bootstrap password must not remain a recovery login after change');
-const createGame=await handler(request('/admin/games','POST',{name:'새 게임',imageUrl:'/assets/game-default.svg'},adminBody.token));
-assert.equal(createGame.status,201);
+const createGame=await handler(request('/admin/games','POST',{name:'새 게임'},adminBody.token));
+assert.equal(createGame.status,201);const createdGame=await createGame.json();assert.ok(createdGame.game.id);assert.equal(createdGame.game.image_url,'/assets/game-default.webp');
+assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_admin_create_game')).body,{p_name:'새 게임',p_image_url:'/assets/game-default.webp',p_reward:100});
+const duplicateGame=await handler(request('/admin/games','POST',{name:'새 게임'},adminBody.token));
+assert.equal(duplicateGame.status,409);assert.equal((await duplicateGame.json()).code,'GAME_NAME_ALREADY_EXISTS');
 const deleteGame=await handler(request(`/admin/games/${gameId}`,'DELETE',undefined,adminBody.token));
 assert.equal(deleteGame.status,200);
 const deleteParticipant=await handler(request(`/admin/participants/${participantId}`,'DELETE',undefined,adminBody.token));
