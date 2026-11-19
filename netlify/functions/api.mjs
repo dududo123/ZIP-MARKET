@@ -1,111 +1,136 @@
-import { createClient } from '@supabase/supabase-js';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import crypto from 'node:crypto';
+import { createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 
-let supabaseClient;
-const jsonHeaders={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
-const response=(status,body)=>({statusCode:status,headers:jsonHeaders,body:JSON.stringify(body)});
-const fail=(status,error)=>response(status,{error});
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const JWT_SECRET = process.env.JWT_SECRET || '';
+const INITIAL_ADMIN_PASSWORD = process.env.INITIAL_ADMIN_PASSWORD || '';
+const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+let adminReady = false;
 
-function env(){
- const config={url:process.env.SUPABASE_URL,key:process.env.SUPABASE_SERVICE_ROLE_KEY,jwtSecret:process.env.JWT_SECRET,initialAdminPassword:process.env.INITIAL_ADMIN_PASSWORD};
- if(!config.url)throw new Error('SUPABASE_URL 환경변수가 없습니다.');
- if(!config.key)throw new Error('SUPABASE_SERVICE_ROLE_KEY 환경변수가 없습니다.');
- if(!config.jwtSecret)throw new Error('JWT_SECRET 환경변수가 없습니다.');
- return config;
+const ok = (body, statusCode = 200) => ({ statusCode, headers: JSON_HEADERS, body: JSON.stringify(body) });
+const fail = (message, statusCode = 400, code = 'REQUEST_FAILED') => ok({ error: code, message }, statusCode);
+const b64 = value => Buffer.from(value).toString('base64url');
+const jsonB64 = value => b64(JSON.stringify(value));
+function sign(payload, expiresInSeconds = 14400) {
+  if (!JWT_SECRET) throw new Error('JWT_SECRET 환경변수가 없습니다.');
+  const now = Math.floor(Date.now() / 1000), header = { alg: 'HS256', typ: 'JWT' }, data = { ...payload, iat: now, exp: now + expiresInSeconds };
+  const unsigned = `${jsonB64(header)}.${jsonB64(data)}`;
+  return `${unsigned}.${createHmac('sha256', JWT_SECRET).update(unsigned).digest('base64url')}`;
 }
-function db(){const c=env();if(!supabaseClient)supabaseClient=createClient(c.url,c.key,{auth:{persistSession:false,autoRefreshToken:false},global:{headers:{'x-application-name':'zip-market-5'}}});return supabaseClient;}
-function parseBody(event){if(!event.body)return {};try{return JSON.parse(event.isBase64Encoded?Buffer.from(event.body,'base64').toString('utf8'):event.body);}catch{throw Object.assign(new Error('요청 형식이 올바르지 않습니다.'),{status:400});}}
-function routeOf(event){let p=event.path||event.rawPath||'/';p=p.replace(/^\/\.netlify\/functions\/api/,'').replace(/^\/api/,'');return p||'/';}
-function bearer(event){const h=event.headers?.authorization||event.headers?.Authorization||'';return h.startsWith('Bearer ')?h.slice(7):'';}
-function auth(event,role){try{const payload=jwt.verify(bearer(event),env().jwtSecret,{algorithms:['HS256']});if(payload.role!==role)throw new Error();return payload;}catch{throw Object.assign(new Error('로그인이 만료되었습니다. 다시 로그인해 주세요.'),{status:401});}}
-function signSession(payload,expiresIn){return jwt.sign(payload,env().jwtSecret,{algorithm:'HS256',expiresIn,issuer:'zip-market'});}
-function cleanText(v,max=120){return String(v??'').trim().slice(0,max);}
-function validUuid(v){return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(v));}
-function throwDb(error,label='데이터베이스 오류'){if(error)throw new Error(`${label}: ${error.message}`);}
-function participantDto(p){return {id:p.id,employeeNo:p.employee_no,name:p.name,creditBalance:Number(p.credit_balance||0),createdAt:p.created_at};}
-function transactionDto(t){return {id:t.id,amount:Number(t.amount||0),type:t.type,description:t.description,createdAt:t.created_at};}
-function gameDto(g){return {id:g.id,name:g.name,imageUrl:g.image_url||'/assets/game-default.webp',createdAt:g.created_at};}
-
-async function readAdminSetting(){const {data,error}=await db().from('app_settings').select('value').eq('key','admin_password').maybeSingle();throwDb(error,'관리자 설정 조회 실패');return data?.value||null;}
-async function writeAdminSetting(hash){const {error}=await db().from('app_settings').upsert({key:'admin_password',value:hash,updated_at:new Date().toISOString()},{onConflict:'key'});throwDb(error,'관리자 설정 저장 실패');}
-async function ensureAdminPassword(){let saved=await readAdminSetting();if(saved)return {hash:saved,created:false};const initial=env().initialAdminPassword;if(!initial)throw new Error('INITIAL_ADMIN_PASSWORD 환경변수가 없습니다.');saved=await bcrypt.hash(initial,10);await writeAdminSetting(saved);return {hash:saved,created:true};}
-async function verifyPassword(input,stored){if(!stored)return false;if(/^\$2[aby]\$/.test(stored))return bcrypt.compare(input,stored);const a=Buffer.from(String(input)),b=Buffer.from(String(stored));return a.length===b.length&&crypto.timingSafeEqual(a,b);
+function verify(token, role) {
+  if (!token || token.split('.').length !== 3) throw Object.assign(new Error('로그인이 필요합니다.'), { status: 401 });
+  const [header, payload, signature] = token.split('.'), expected = createHmac('sha256', JWT_SECRET).update(`${header}.${payload}`).digest('base64url');
+  const a = Buffer.from(signature), b = Buffer.from(expected); if (a.length !== b.length || !timingSafeEqual(a, b)) throw Object.assign(new Error('로그인 정보가 올바르지 않습니다.'), { status: 401 });
+  const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')); if (data.exp < Math.floor(Date.now() / 1000)) throw Object.assign(new Error('로그인이 만료되었습니다. 다시 로그인해 주세요.'), { status: 401 });
+  if (role && data.role !== role) throw Object.assign(new Error('접근 권한이 없습니다.'), { status: 403 }); return data;
 }
-async function adminBootstrap(){
- const [peopleRes,gamesRes]=await Promise.all([
-  db().from('participants').select('id,employee_no,name,credit_balance,created_at').order('created_at',{ascending:false}).limit(1000),
-  db().from('games').select('id,name,image_url,created_at').order('created_at',{ascending:true}).limit(1000)
- ]);throwDb(peopleRes.error,'참가자 목록 조회 실패');throwDb(gamesRes.error,'게임 목록 조회 실패');
- return {participants:(peopleRes.data||[]).map(participantDto),games:(gamesRes.data||[]).map(gameDto)};
+function bearer(event) { return (event.headers.authorization || event.headers.Authorization || '').replace(/^Bearer\s+/i, ''); }
+function requireEnv() {
+  const missing = [['SUPABASE_URL',SUPABASE_URL],['SUPABASE_SERVICE_ROLE_KEY',SUPABASE_KEY],['JWT_SECRET',JWT_SECRET]].filter(([,v])=>!v).map(([k])=>k);
+  if (missing.length) throw new Error(`Netlify 환경변수가 없습니다: ${missing.join(', ')}`);
 }
-async function userDashboard(participant){
- const [transactionsRes,gamesRes,completedRes]=await Promise.all([
-  db().from('transactions').select('id,amount,type,description,created_at').eq('participant_id',participant.id).order('created_at',{ascending:false}).limit(1000),
-  db().from('games').select('id,name,image_url,created_at').order('created_at',{ascending:true}).limit(1000),
-  db().from('game_completions').select('game_id').eq('participant_id',participant.id).limit(1000)
- ]);throwDb(transactionsRes.error,'사용내역 조회 실패');throwDb(gamesRes.error,'게임 조회 실패');throwDb(completedRes.error,'게임 완료 조회 실패');
- return {user:participantDto(participant),transactions:(transactionsRes.data||[]).map(transactionDto),games:(gamesRes.data||[]).map(gameDto),completedGameIds:(completedRes.data||[]).map(x=>x.game_id)};
+async function sb(path, { method = 'GET', body, prefer = 'return=representation' } = {}) {
+  requireEnv();
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method, headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Accept: 'application/json', Prefer: prefer },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) })
+  });
+  const text = await response.text(); let data = text ? (()=>{try{return JSON.parse(text)}catch{return text}})() : null;
+  if (!response.ok) { const detail = typeof data === 'object' ? (data.message || data.details || data.hint) : data; const err = new Error(detail || `Supabase 요청 실패 (${response.status})`); err.status = response.status === 404 ? 500 : response.status; err.db = data; throw err; }
+  return data;
 }
-async function currentParticipant(id){const {data,error}=await db().from('participants').select('*').eq('id',id).maybeSingle();throwDb(error,'사용자 조회 실패');if(!data)throw Object.assign(new Error('사용자를 찾을 수 없습니다.'),{status:404});return data;}
+const enc = value => encodeURIComponent(String(value));
+const one = rows => Array.isArray(rows) ? rows[0] : rows;
 
-async function health(){const flags={supabaseUrl:Boolean(process.env.SUPABASE_URL),supabaseKey:Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),jwtSecret:Boolean(process.env.JWT_SECRET),initialAdminPassword:Boolean(process.env.INITIAL_ADMIN_PASSWORD)};try{const result=await ensureAdminPassword();return response(200,{ok:true,environment:flags,database:true,adminInitialized:true,adminCreatedNow:result.created,version:'5.0.0'});}catch(e){return response(500,{ok:false,environment:flags,database:false,adminInitialized:false,error:e.message});}}
-async function userLogin(body){const employeeNo=cleanText(body.employeeNo,40),password=String(body.password||'');if(!employeeNo||!password)return fail(400,'사번과 비밀번호를 입력해 주세요.');const {data,error}=await db().from('participants').select('*').eq('employee_no',employeeNo).maybeSingle();throwDb(error,'사용자 로그인 조회 실패');if(!data||!(await verifyPassword(password,data.password_hash||data.password)))return fail(401,'사번 또는 비밀번호가 올바르지 않습니다.');const token=signSession({role:'user',sub:data.id},'24h');return response(200,{token,...await userDashboard(data)});}
-async function adminLogin(body){const password=String(body.password||'');if(!password)return fail(400,'관리자 비밀번호를 입력해 주세요.');const setting=await ensureAdminPassword();let ok=await verifyPassword(password,setting.hash);const initial=env().initialAdminPassword;
- // 기존 DB 비밀번호와 현재 Netlify 초기 비밀번호가 어긋난 경우 자동 동기화합니다.
- if(!ok&&initial&&password===initial){await writeAdminSetting(await bcrypt.hash(initial,10));ok=true;}
- if(!ok)return fail(401,'LOGIN_FAILED');const token=signSession({role:'admin',sub:'admin'},'12h');return response(200,{token,...await adminBootstrap()});}
+async function ensureAdmin() {
+  if (adminReady) return false;
+  if (!INITIAL_ADMIN_PASSWORD) throw new Error('INITIAL_ADMIN_PASSWORD 환경변수가 없습니다.');
+  const result = await sb('rpc/initialize_admin', { method:'POST', body:{p_password:INITIAL_ADMIN_PASSWORD} });
+  adminReady = true; return !!result?.created;
+}
+async function dashboard(participantId) {
+  const [users, transactions, games, completions] = await Promise.all([
+    sb(`participants?id=eq.${enc(participantId)}&select=id,employee_no,name,credits,total_used&limit=1`),
+    sb(`transactions?participant_id=eq.${enc(participantId)}&select=id,amount,kind,description,created_at&order=created_at.desc&limit=100`),
+    sb('games?active=eq.true&select=code,name,image_url,reward,active,created_at&order=created_at.asc'),
+    sb(`game_completions?participant_id=eq.${enc(participantId)}&select=game_code`)
+  ]);
+  const user = one(users); if (!user) throw Object.assign(new Error('사용자 정보를 찾을 수 없습니다.'),{status:404});
+  return { user, transactions: transactions || [], games: games || [], completedGames: (completions || []).map(x=>x.game_code) };
+}
+async function adminGames() { return await sb('games?select=code,name,image_url,reward,active,created_at&order=created_at.asc'); }
+function cleanEmployee(value) { return String(value || '').trim(); }
+function cleanCode(value) { return String(value || '').trim().toLowerCase().replace(/[^a-z0-9가-힣_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,60); }
 
-async function createParticipant(body){const employeeNo=cleanText(body.employeeNo,40),name=cleanText(body.name,80),password=String(body.password||'');if(!employeeNo||!name||!password)return fail(400,'사번, 이름, 초기 비밀번호를 모두 입력해 주세요.');const password_hash=await bcrypt.hash(password,10);const {data,error}=await db().from('participants').insert({employee_no:employeeNo,name,password_hash,credit_balance:0}).select('*').single();if(error?.code==='23505')return fail(409,'이미 등록된 사번입니다.');throwDb(error,'참가자 등록 실패');return response(201,{participant:participantDto(data)});}
-async function bulkParticipants(body){const rows=Array.isArray(body.participants)?body.participants.slice(0,500):[];if(!rows.length)return fail(400,'등록할 참가자가 없습니다.');let created=0,skipped=0;for(const p of rows){const employeeNo=cleanText(p.employeeNo,40),name=cleanText(p.name,80),password=String(p.password||'');if(!employeeNo||!name||!password){skipped++;continue;}const password_hash=await bcrypt.hash(password,8);const {error}=await db().from('participants').insert({employee_no:employeeNo,name,password_hash,credit_balance:0});if(error){if(error.code==='23505'){skipped++;continue;}throwDb(error,'참가자 일괄 등록 실패');}created++;}return response(201,{created,skipped});}
-async function grantCredit(id,body){if(!validUuid(id))return fail(400,'잘못된 참가자 ID입니다.');const amount=Math.trunc(Number(body.amount));if(!Number.isInteger(amount)||amount<=0||amount>1000000)return fail(400,'지급 금액이 올바르지 않습니다.');const p=await currentParticipant(id);const next=Number(p.credit_balance||0)+amount;const {error}=await db().from('participants').update({credit_balance:next,updated_at:new Date().toISOString()}).eq('id',id);throwDb(error,'크레딧 지급 실패');const tx=await db().from('transactions').insert({participant_id:id,amount,type:'grant',description:'관리자 크레딧 지급'});throwDb(tx.error,'크레딧 내역 저장 실패');return response(200,{creditBalance:next});}
-async function deleteParticipant(id){if(!validUuid(id))return fail(400,'잘못된 참가자 ID입니다.');for(const table of ['game_completions','transactions']){const {error}=await db().from(table).delete().eq('participant_id',id);throwDb(error,`${table} 삭제 실패`);}const {error}=await db().from('participants').delete().eq('id',id);throwDb(error,'참가자 삭제 실패');return response(200,{ok:true});}
-async function createGame(body){const name=cleanText(body.name,80),imageUrl=cleanText(body.imageUrl,500)||'/assets/game-default.webp';if(!name)return fail(400,'게임 이름을 입력해 주세요.');if(!imageUrl.startsWith('/')&&!/^https:\/\//i.test(imageUrl))return fail(400,'이미지 주소는 HTTPS 또는 /assets 경로여야 합니다.');const {data,error}=await db().from('games').insert({name,image_url:imageUrl}).select('*').single();throwDb(error,'게임 추가 실패');return response(201,{game:gameDto(data)});}
-async function deleteGame(id){if(!validUuid(id))return fail(400,'잘못된 게임 ID입니다.');const c=await db().from('game_completions').delete().eq('game_id',id);throwDb(c.error,'게임 완료기록 삭제 실패');const g=await db().from('games').delete().eq('id',id);throwDb(g.error,'게임 삭제 실패');return response(200,{ok:true});}
-function makeQrToken(payload){return signSession({...payload,qr:true,jti:crypto.randomUUID()},'12h');}
-async function paymentQr(body){const amount=Math.trunc(Number(body.amount)),description=cleanText(body.description,120)||'ZIP! MARKET 결제';if(!Number.isInteger(amount)||amount<=0||amount>1000000)return fail(400,'결제 금액이 올바르지 않습니다.');return response(200,{qrToken:makeQrToken({kind:'credit',amount,description})});}
-async function gameQr(id){if(!validUuid(id))return fail(400,'잘못된 게임 ID입니다.');const {data,error}=await db().from('games').select('id,name').eq('id',id).maybeSingle();throwDb(error,'게임 조회 실패');if(!data)return fail(404,'게임을 찾을 수 없습니다.');return response(200,{qrToken:makeQrToken({kind:'game',gameId:data.id,gameName:data.name})});}
-function extractQrToken(raw){const text=String(raw||'').trim();if(!text)return '';try{const j=JSON.parse(text);if(j.token)return j.token;}catch{}try{const u=new URL(text);return u.searchParams.get('token')||text;}catch{}return text;}
-async function redeem(userId,body){const raw=extractQrToken(body.token);let qr;try{qr=jwt.verify(raw,env().jwtSecret,{algorithms:['HS256'],issuer:'zip-market'});}catch{return fail(400,'유효하지 않거나 만료된 QR 코드입니다.');}if(!qr.qr)return fail(400,'ZIP! MARKET QR 코드가 아닙니다.');const p=await currentParticipant(userId);
- if(qr.kind==='credit'){
-  const exists=await db().from('transactions').select('id').eq('participant_id',userId).eq('reference',qr.jti).maybeSingle();throwDb(exists.error,'중복 결제 확인 실패');if(exists.data)return fail(409,'이미 사용한 결제 QR입니다.');
-  const rpc=await db().rpc('zip_market_redeem_credit',{p_participant_id:userId,p_amount:Number(qr.amount),p_description:qr.description,p_reference:qr.jti});
-  if(rpc.error){
-   if(/INSUFFICIENT_CREDIT/i.test(rpc.error.message))return fail(409,'크레딧이 부족합니다.');
-   // 구버전 DB에서 RPC를 아직 설치하지 않은 경우에도 동작하도록 안전한 대체 경로를 둡니다.
-   if(!/function .* does not exist|schema cache/i.test(rpc.error.message))throwDb(rpc.error,'결제 실패');
-   if(Number(p.credit_balance||0)<Number(qr.amount))return fail(409,'크레딧이 부족합니다.');const next=Number(p.credit_balance)-Number(qr.amount);const u=await db().from('participants').update({credit_balance:next,updated_at:new Date().toISOString()}).eq('id',userId).eq('credit_balance',p.credit_balance).select('credit_balance').maybeSingle();throwDb(u.error,'결제 잔액 변경 실패');if(!u.data)return fail(409,'다른 결제가 먼저 처리되었습니다. 잔액을 확인한 뒤 다시 시도해 주세요.');const t=await db().from('transactions').insert({participant_id:userId,amount:-Number(qr.amount),type:'payment',description:qr.description,reference:qr.jti});throwDb(t.error,'결제 내역 저장 실패');
+export const handler = async event => {
+  if (event.httpMethod === 'OPTIONS') return {statusCode:204,headers:{...JSON_HEADERS,'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'Authorization, Content-Type','Access-Control-Allow-Methods':'GET,POST,DELETE,OPTIONS'},body:''};
+  try {
+    const url = new URL(event.rawUrl || `https://local${event.path}`); let path = url.pathname.replace(/^\/\.netlify\/functions\/api/,'').replace(/^\/api/,'') || '/';
+    const method = event.httpMethod || 'GET'; let body = {}; if (event.body) { try { body = JSON.parse(event.body); } catch { return fail('요청 형식이 올바르지 않습니다.',400,'INVALID_JSON'); } }
+
+    if (path === '/health' && method === 'GET') {
+      const environment = { supabaseUrl:!!SUPABASE_URL, supabaseKey:!!SUPABASE_KEY, jwtSecret:!!JWT_SECRET, initialAdminPassword:!!INITIAL_ADMIN_PASSWORD };
+      try { requireEnv(); const created = await ensureAdmin(); return ok({ok:true,environment,database:true,adminInitialized:true,adminCreatedNow:created,transport:'direct-rest',runtime:process.version}); }
+      catch(error){ return ok({ok:false,environment,database:false,adminInitialized:false,error:error.message},503); }
+    }
+
+    if (path === '/user/login' && method === 'POST') {
+      const employeeNo = cleanEmployee(body.employeeNo), password = String(body.password || ''); if (!employeeNo || !password) return fail('사번과 비밀번호를 입력해 주세요.');
+      const rows = await sb('rpc/authenticate_participant',{method:'POST',body:{p_employee_no:employeeNo,p_password:password}}); const user = one(rows);
+      if (!user) return fail('사번 또는 비밀번호가 올바르지 않습니다.',401,'LOGIN_FAILED');
+      const token = sign({role:'user',sub:user.id,employeeNo:user.employee_no},28800); return ok({token,dashboard:await dashboard(user.id)});
+    }
+
+    if (path === '/admin/login' && method === 'POST') {
+      await ensureAdmin(); const password = String(body.password || ''); if (!password) return fail('관리자 비밀번호를 입력해 주세요.');
+      const checked = await sb('rpc/verify_admin_password',{method:'POST',body:{p_password:password}}); let matched = !!checked?.matched;
+      if (!matched && INITIAL_ADMIN_PASSWORD && password === INITIAL_ADMIN_PASSWORD) { await sb('rpc/set_admin_password',{method:'POST',body:{p_password:password}}); matched = true; }
+      if (!matched) return fail('관리자 비밀번호가 올바르지 않습니다.',401,'LOGIN_FAILED'); return ok({token:sign({role:'admin',sub:'admin'},14400)});
+    }
+
+    if (path === '/user/pay' && method === 'POST') {
+      const auth=verify(bearer(event),'user'), amount=Number(body.amount), description=String(body.description||'크레딧 결제').slice(0,120), nonce=String(body.idempotencyKey||randomUUID());
+      if(!Number.isInteger(amount)||amount<1||amount>1000000)return fail('결제 금액이 올바르지 않습니다.');
+      await sb('rpc/pay_credit_once',{method:'POST',body:{p_participant_id:auth.sub,p_amount:amount,p_description:description,p_nonce:nonce}}); return ok({dashboard:await dashboard(auth.sub)});
+    }
+
+    if (path === '/user/scan' && method === 'POST') {
+      const auth=verify(bearer(event),'user'), qr=verify(String(body.token||''),'qr'); let message='QR 처리가 완료됐습니다.';
+      if(qr.purpose==='payment'){await sb('rpc/pay_credit_once',{method:'POST',body:{p_participant_id:auth.sub,p_amount:Number(qr.amount),p_description:String(qr.description||'QR 결제'),p_nonce:String(qr.jti)}});message=`${Number(qr.amount)} C 결제가 완료됐습니다.`;}
+      else if(qr.purpose==='game'){const result=await sb('rpc/complete_game',{method:'POST',body:{p_participant_id:auth.sub,p_game_code:qr.gameCode}});const r=one(result)||result;message=r?.already_completed?'이미 완료한 게임입니다.':`${Number(r?.reward||0)} C를 받았습니다.`;}
+      else return fail('지원하지 않는 QR입니다.',400,'INVALID_QR'); return ok({message,dashboard:await dashboard(auth.sub)});
+    }
+
+    if (path === '/admin/participants' && method === 'GET') {
+      verify(bearer(event),'admin'); const rows=await sb('participants?select=id,employee_no,name,credits,total_used,created_at&order=created_at.desc&limit=2000'); return ok({participants:rows||[]});
+    }
+    if (path === '/admin/participants' && method === 'POST') {
+      verify(bearer(event),'admin'); const employee_no=cleanEmployee(body.employeeNo),name=String(body.name||'').trim(),password=String(body.password||''),credits=Number(body.credits||0);
+      if(!employee_no||!name||password.length<4||!Number.isInteger(credits)||credits<0)return fail('참가자 정보를 다시 확인해 주세요.');
+      const result=await sb('rpc/bulk_upsert_participants',{method:'POST',body:{p_rows:[{employeeNo:employee_no,name,password,credits}]}}); return ok({created:result?.created||1},201);
+    }
+    if (path === '/admin/participants/bulk' && method === 'POST') {
+      verify(bearer(event),'admin'); const input=Array.isArray(body.rows)?body.rows:[]; if(!input.length||input.length>500)return fail('1명 이상 500명 이하로 입력해 주세요.');
+      const records=[]; for(const item of input){const employeeNo=cleanEmployee(item.employeeNo),name=String(item.name||'').trim(),password=String(item.password||'1234'),credits=Number(item.credits||0);if(!employeeNo||!name||password.length<4||!Number.isInteger(credits)||credits<0)return fail(`${employeeNo||'알 수 없는 사번'} 행을 확인해 주세요.`);records.push({employeeNo,name,password,credits});}
+      const result=await sb('rpc/bulk_upsert_participants',{method:'POST',body:{p_rows:records}}); return ok({created:result?.created||records.length});
+    }
+    let match=path.match(/^\/admin\/participants\/([^/]+)\/credit$/);
+    if(match&&method==='POST'){verify(bearer(event),'admin');const amount=Number(body.amount);if(!Number.isInteger(amount)||amount<1)return fail('지급 금액이 올바르지 않습니다.');await sb('rpc/add_credit',{method:'POST',body:{p_participant_id:decodeURIComponent(match[1]),p_amount:amount,p_description:String(body.description||'관리자 크레딧 지급')}});return ok({ok:true});}
+    match=path.match(/^\/admin\/participants\/([^/]+)$/);
+    if(match&&method==='DELETE'){verify(bearer(event),'admin');const id=decodeURIComponent(match[1]);await Promise.all([sb(`transactions?participant_id=eq.${enc(id)}`,{method:'DELETE',prefer:'return=minimal'}),sb(`game_completions?participant_id=eq.${enc(id)}`,{method:'DELETE',prefer:'return=minimal'})]);await sb(`participants?id=eq.${enc(id)}`,{method:'DELETE',prefer:'return=minimal'});return ok({ok:true});}
+
+    if(path==='/admin/games'&&method==='GET'){verify(bearer(event),'admin');return ok({games:await adminGames()});}
+    if(path==='/admin/games'&&method==='POST'){verify(bearer(event),'admin');const code=cleanCode(body.code),name=String(body.name||'').trim(),reward=Number(body.reward||0),image_url=String(body.imageUrl||'/assets/logo.webp').trim()||'/assets/logo.webp';if(!code||!name||!Number.isInteger(reward)||reward<0)return fail('게임 정보를 다시 확인해 주세요.');const rows=await sb('games?on_conflict=code',{method:'POST',body:{code,name,reward,image_url,active:true},prefer:'resolution=merge-duplicates,return=representation'});return ok({game:one(rows)},201);}
+    match=path.match(/^\/admin\/games\/([^/]+)\/qr$/);
+    if(match&&method==='POST'){verify(bearer(event),'admin');const code=decodeURIComponent(match[1]),game=one(await sb(`games?code=eq.${enc(code)}&select=code,name,reward&limit=1`));if(!game)return fail('게임을 찾을 수 없습니다.',404);return ok({game,token:sign({role:'qr',purpose:'game',gameCode:game.code,jti:randomUUID()},86400)});}
+    match=path.match(/^\/admin\/games\/([^/]+)$/);
+    if(match&&method==='DELETE'){verify(bearer(event),'admin');const code=decodeURIComponent(match[1]);await sb(`game_completions?game_code=eq.${enc(code)}`,{method:'DELETE',prefer:'return=minimal'});await sb(`games?code=eq.${enc(code)}`,{method:'DELETE',prefer:'return=minimal'});return ok({ok:true});}
+    if(path==='/admin/payment-qr'&&method==='POST'){verify(bearer(event),'admin');const amount=Number(body.amount),description=String(body.description||'현장 결제').trim().slice(0,120);if(!Number.isInteger(amount)||amount<1||amount>1000000)return fail('결제 금액이 올바르지 않습니다.');return ok({amount,description,token:sign({role:'qr',purpose:'payment',amount,description,jti:randomUUID()},86400)});}
+    if(path==='/admin/password'&&method==='POST'){verify(bearer(event),'admin');const password=String(body.password||'');if(password.length<8)return fail('관리자 비밀번호는 8자 이상이어야 합니다.');await ensureAdmin();await sb('rpc/set_admin_password',{method:'POST',body:{p_password:password}});return ok({ok:true});}
+
+    return fail('요청한 API를 찾을 수 없습니다.',404,'NOT_FOUND');
+  } catch(error) {
+    console.error('ZIP_MARKET_API_ERROR',error?.message,error?.db||''); let status=Number(error.status)||500; const known=[['INSUFFICIENT_CREDIT','크레딧이 부족합니다.'],['PARTICIPANT_NOT_FOUND','참가자를 찾을 수 없습니다.'],['GAME_NOT_FOUND','게임을 찾을 수 없습니다.'],['duplicate key','이미 등록된 사번 또는 코드입니다.']]; const friendly=known.find(([key])=>String(error.message).includes(key)); if(friendly&&status>=500)status=400; const message=friendly?.[1]||(status>=500?'서버 처리 중 오류가 발생했습니다. Netlify 환경변수와 Supabase schema.sql 적용 여부를 확인해 주세요.':error.message);
+    return fail(message,status,status>=500?'SERVER_ERROR':'REQUEST_FAILED');
   }
-  return response(200,{message:`${Number(qr.amount).toLocaleString()} C 결제가 완료되었습니다.`,...await userDashboard(await currentParticipant(userId))});
- }
- if(qr.kind==='game'){
-  const {data:game,error}=await db().from('games').select('id,name').eq('id',qr.gameId).maybeSingle();throwDb(error,'게임 조회 실패');if(!game)return fail(404,'삭제되었거나 존재하지 않는 게임입니다.');const {error:insertError}=await db().from('game_completions').upsert({participant_id:userId,game_id:game.id},{onConflict:'participant_id,game_id',ignoreDuplicates:true});throwDb(insertError,'게임 완료 저장 실패');return response(200,{message:`${game.name} 완료 처리되었습니다.`,...await userDashboard(await currentParticipant(userId))});
- }
- return fail(400,'지원하지 않는 QR 코드입니다.');
-}
-async function updateAdminPassword(body){const password=String(body.password||'');if(password.length<8)return fail(400,'관리자 비밀번호는 8자 이상이어야 합니다.');await writeAdminSetting(await bcrypt.hash(password,10));return response(200,{ok:true});}
-
-export async function handler(event){
- if(event.httpMethod==='OPTIONS')return response(204,{});
- const path=routeOf(event),method=event.httpMethod||'GET';
- try{
-  if(method==='GET'&&path==='/health')return await health();
-  const body=['POST','PUT','PATCH'].includes(method)?parseBody(event):{};
-  if(method==='POST'&&path==='/user/login')return await userLogin(body);
-  if(method==='POST'&&path==='/admin/login')return await adminLogin(body);
-  if(method==='POST'&&path==='/user/redeem'){const u=auth(event,'user');return await redeem(u.sub,body);}
-  if(path.startsWith('/admin/'))auth(event,'admin');
-  if(method==='GET'&&path==='/admin/bootstrap')return response(200,await adminBootstrap());
-  if(method==='POST'&&path==='/admin/participants')return await createParticipant(body);
-  if(method==='POST'&&path==='/admin/participants/bulk')return await bulkParticipants(body);
-  let m=path.match(/^\/admin\/participants\/([^/]+)\/credit$/);if(method==='POST'&&m)return await grantCredit(m[1],body);
-  m=path.match(/^\/admin\/participants\/([^/]+)$/);if(method==='DELETE'&&m)return await deleteParticipant(m[1]);
-  if(method==='POST'&&path==='/admin/payment-qr')return await paymentQr(body);
-  if(method==='POST'&&path==='/admin/games')return await createGame(body);
-  m=path.match(/^\/admin\/games\/([^/]+)\/qr$/);if(method==='POST'&&m)return await gameQr(m[1]);
-  m=path.match(/^\/admin\/games\/([^/]+)$/);if(method==='DELETE'&&m)return await deleteGame(m[1]);
-  if(method==='PUT'&&path==='/admin/password')return await updateAdminPassword(body);
-  return fail(404,'API 경로를 찾을 수 없습니다.');
- }catch(e){console.error('[ZIP MARKET API]',method,path,e);return fail(e.status||500,e.status?e.message:'서버 처리 중 오류가 발생했습니다. '+e.message);}
-}
+};
