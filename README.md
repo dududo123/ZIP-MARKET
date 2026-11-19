@@ -1,3 +1,9 @@
+# ZIP! MARKET v8.1 — Netlify Function 런타임 수정본
+
+> v8 업로드 후 `/api/health`에서 `module is not defined in ES module scope`가 발생한 경우를 수정했습니다.
+> 원인은 Netlify가 만든 CommonJS Function 번들(`module.exports`)이 함께 포함된 `package.json`의 `type: module` 때문에 ES module로 다시 해석된 것이었습니다.
+> v8.1은 프로젝트 루트의 module 강제 설정과 Function 번들 안의 `package.json` 포함을 제거해 이 충돌을 막습니다.
+
 # ZIP! MARKET v8 — 사용자·관리자 로그인 복구 통합본
 
 ## 실제 로그인 장애 원인
@@ -34,7 +40,7 @@ V5 이전의 실제 v4 원본에서 사용한 구성을 그대로 복원했습�
 ## 배포 순서
 
 1. 압축을 풀고 GitHub 저장소 내용을 이 프로젝트 파일로 **전체 교체**합니다.
-2. Supabase → SQL Editor에서 `supabase/schema.sql` 전체를 한 번 실행합니다.
+2. **v8 적용 때 이미 `supabase/schema.sql`을 실행했다면 SQL은 다시 실행하지 않아도 됩니다.** 아직 실행하지 않았다면 Supabase → SQL Editor에서 `supabase/schema.sql` 전체를 한 번 실행합니다.
    - 기존 데이터는 삭제하지 않습니다.
    - 기존 열 이름을 바꾸지 않고 로그인 인증 함수, 새 게임 보상, 원자적 크레딧 처리 함수만 안전하게 보강합니다.
    - 이 SQL을 실행하지 않으면 로그인 화면에 `SCHEMA_MISSING` 안내가 표시됩니다.
@@ -43,7 +49,7 @@ V5 이전의 실제 v4 원본에서 사용한 구성을 그대로 복원했습�
    - `SUPABASE_SERVICE_ROLE_KEY` (`sb_secret_...` 또는 기존 `eyJ...` service_role)
    - `JWT_SECRET`
    - `INITIAL_ADMIN_PASSWORD`
-4. Netlify에서 한 번 배포합니다.
+4. GitHub 연동 자동 빌드를 꺼둔 경우 Netlify에서 **Deploys → Trigger deploy → Clear cache and deploy site**를 한 번 실행합니다.
 5. 배포 후 `https://사이트주소/api/health`를 엽니다.
 
 정상 예시:
@@ -55,7 +61,7 @@ V5 이전의 실제 v4 원본에서 사용한 구성을 그대로 복원했습�
   "adminInitialized": true,
   "transport": "direct-rest",
   "schema": "v5-compatible",
-  "version": "8.0.0"
+  "version": "8.1.0"
 }
 ```
 

@@ -65,7 +65,7 @@ test('health verifies old V5 tables and compatible auth functions', async () => 
   assert.equal(response.statusCode, 200);
   assert.deepEqual(parsed(response), {
     ok:true, database:true, adminInitialized:true, adminCreatedNow:false,
-    transport:'direct-rest', schema:'v5-compatible', keyType:'secret', version:'8.0.0'
+    transport:'direct-rest', schema:'v5-compatible', keyType:'secret', version:'8.1.0'
   });
   assert.equal(seenHeaders.at(-1).authorization, undefined);
 });

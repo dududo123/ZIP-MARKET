@@ -1,6 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-const VERSION = '8.0.0';
+const VERSION = '8.1.0';
 
 class AppError extends Error {
   constructor(status, code, message = code, detail = '') {
