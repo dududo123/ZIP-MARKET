@@ -1,4 +1,4 @@
--- ZIP! MARKET v8.9.0 — FULL IDEMPOTENT SUPABASE GAME/PASSWORD COMPATIBILITY REPAIR
+-- ZIP! MARKET v9.0.0 — FULL IDEMPOTENT SUPABASE GAME REWARD ADMINISTRATION REPAIR
 -- Run this entire file once in Supabase > SQL Editor > New query.
 -- It preserves rows. It never drops tables and never deletes participant, game,
 -- transaction, completion, or setting data. It only replaces ZIP! MARKET RPCs.
@@ -324,7 +324,7 @@ before insert or update on public.game_completions
 for each row execute function public.zip_market_sync_game_completion_compat();
 
 -- Synchronize all known transaction column generations. This trigger protects
--- old Functions and future direct inserts as well as the v8.9 RPCs.
+-- old Functions and future direct inserts as well as the v9.0 RPCs.
 create or replace function public.zip_market_sync_transaction_compat()
 returns trigger
 language plpgsql
@@ -403,6 +403,7 @@ drop function if exists public.zip_market_grant_credit(uuid, integer, text);
 drop function if exists public.zip_market_pay_credit(uuid, integer, text);
 drop function if exists public.zip_market_pay_credit(uuid, integer, text, text);
 drop function if exists public.zip_market_admin_create_game(text, text, integer);
+drop function if exists public.zip_market_admin_update_game_reward(text, integer);
 drop function if exists public.zip_market_complete_game(uuid, uuid);
 drop function if exists public.zip_market_complete_game(uuid, text);
 drop function if exists public.zip_market_resolve_game(text);
@@ -1015,6 +1016,40 @@ begin
 end;
 $$;
 
+create function public.zip_market_admin_update_game_reward(
+  p_game_identifier text,
+  p_reward integer
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_catalog
+as $$
+declare
+  v_game public.games%rowtype;
+  v_resolved_id text;
+begin
+  if p_reward is null or p_reward < 0 then
+    raise exception 'INVALID_GAME_REWARD' using errcode = '22023';
+  end if;
+
+  v_resolved_id := public.zip_market_resolve_game(p_game_identifier)->>'id';
+  update public.games
+     set reward = p_reward,
+         points = p_reward,
+         updated_at = now()
+   where id::text = v_resolved_id
+   returning * into v_game;
+
+  if not found then raise exception 'GAME_NOT_FOUND' using errcode = 'P0002'; end if;
+
+  return to_jsonb(v_game) || jsonb_build_object(
+    'publicId', coalesce(v_game.public_id::text, v_game.slug, v_game.id::text),
+    'identifiers', jsonb_build_array(v_game.id::text, v_game.slug, v_game.public_id::text)
+  );
+end;
+$$;
+
 create function public.zip_market_complete_game(
   p_participant_id uuid,
   p_game_id text
@@ -1126,6 +1161,7 @@ revoke all on function public.zip_market_set_admin_password(text) from public, a
 revoke all on function public.zip_market_grant_credit(uuid, integer, text) from public, anon, authenticated;
 revoke all on function public.zip_market_pay_credit(uuid, integer, text, text) from public, anon, authenticated;
 revoke all on function public.zip_market_admin_create_game(text, text, integer) from public, anon, authenticated;
+revoke all on function public.zip_market_admin_update_game_reward(text, integer) from public, anon, authenticated;
 revoke all on function public.zip_market_game_alias(text) from public, anon, authenticated;
 revoke all on function public.zip_market_resolve_game(text) from public, anon, authenticated;
 revoke all on function public.zip_market_complete_game(uuid, text) from public, anon, authenticated;
@@ -1141,6 +1177,7 @@ grant execute on function public.zip_market_set_admin_password(text) to service_
 grant execute on function public.zip_market_grant_credit(uuid, integer, text) to service_role;
 grant execute on function public.zip_market_pay_credit(uuid, integer, text, text) to service_role;
 grant execute on function public.zip_market_admin_create_game(text, text, integer) to service_role;
+grant execute on function public.zip_market_admin_update_game_reward(text, integer) to service_role;
 grant execute on function public.zip_market_game_alias(text) to service_role;
 grant execute on function public.zip_market_resolve_game(text) to service_role;
 grant execute on function public.zip_market_complete_game(uuid, text) to service_role;
@@ -1148,7 +1185,7 @@ grant execute on function public.zip_auth_admin(text, text) to service_role;
 grant execute on function public.zip_auth_participant(text, text) to service_role;
 
 insert into public.app_settings(key, value, updated_at)
-values ('schema_version', '8.9.0', now())
+values ('schema_version', '9.0.0', now())
 on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at;
 
 -- ---------------------------------------------------------------------------
@@ -1171,6 +1208,7 @@ begin
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
     ('public.zip_market_admin_create_game(text,text,integer)'),
+    ('public.zip_market_admin_update_game_reward(text,integer)'),
     ('public.zip_market_resolve_game(text)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
@@ -1188,6 +1226,7 @@ begin
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
     ('public.zip_market_admin_create_game(text,text,integer)'),
+    ('public.zip_market_admin_update_game_reward(text,integer)'),
     ('public.zip_market_resolve_game(text)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
@@ -1205,6 +1244,7 @@ begin
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
     ('public.zip_market_admin_create_game(text,text,integer)'),
+    ('public.zip_market_admin_update_game_reward(text,integer)'),
     ('public.zip_market_resolve_game(text)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
@@ -1289,6 +1329,7 @@ where n.nspname = 'public'
     'zip_market_grant_credit',
     'zip_market_pay_credit',
     'zip_market_admin_create_game',
+    'zip_market_admin_update_game_reward',
     'zip_market_resolve_game',
     'zip_market_complete_game'
   )

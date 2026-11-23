@@ -1,6 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-const VERSION = '8.9.0';
+const VERSION = '9.0.0';
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -208,7 +208,7 @@ async function health() {
     adminCreatedNow: Boolean(initialized?.createdNow),
     transport: 'direct-rest',
     runtime: 'netlify-modern-response',
-    schema: 'zip-market-v8.9',
+    schema: 'zip-market-v9.0',
     version: VERSION
   };
 }
@@ -386,11 +386,27 @@ async function route(request) {
     const name = String(body.name || '').trim();
     if (!name) throw new ApiError(400, 'GAME_NAME_REQUIRED', '게임 이름을 입력해 주세요.');
     const imageUrl = String(body.imageUrl || '/assets/game-default.webp').trim() || '/assets/game-default.webp';
-    const reward = Number(body.reward ?? 100);
-    if (!Number.isInteger(reward) || reward < 0) throw new ApiError(400, 'INVALID_GAME_REWARD', '게임 보상은 0 이상의 정수여야 합니다.');
+    const rewardText = String(body.reward ?? '100').trim();
+    if (!/^(0|[1-9]\d*)$/.test(rewardText)) throw new ApiError(400, 'INVALID_GAME_REWARD', '게임 보상은 0 이상의 정수여야 합니다.');
+    const reward = Number(rewardText);
+    if (!Number.isSafeInteger(reward)) throw new ApiError(400, 'INVALID_GAME_REWARD', '게임 보상 금액이 너무 큽니다.');
     try {
       const game = normalizeRpcResult(await rpc('zip_market_admin_create_game', { p_name: name, p_image_url: imageUrl, p_reward: reward }));
       return response(201, { ok: true, game });
+    } catch (error) { throw friendlyDatabaseError(error); }
+  }
+
+  const gameRewardUpdate = path.match(/^\/admin\/games\/([^/]{1,200})\/reward$/i);
+  if (method === 'PATCH' && gameRewardUpdate) {
+    const gameIdentifier = normalizeGameIdentifier(decodeURIComponent(gameRewardUpdate[1]));
+    const rewardText = String(body.reward ?? '').trim();
+    if (!gameIdentifier) throw new ApiError(400, 'INVALID_GAME_ID', '게임 정보가 없습니다.');
+    if (!/^(0|[1-9]\d*)$/.test(rewardText)) throw new ApiError(400, 'INVALID_GAME_REWARD', '게임 보상은 0 이상의 정수여야 합니다.');
+    const reward = Number(rewardText);
+    if (!Number.isSafeInteger(reward)) throw new ApiError(400, 'INVALID_GAME_REWARD', '게임 보상 금액이 너무 큽니다.');
+    try {
+      const game = normalizeRpcResult(await rpc('zip_market_admin_update_game_reward', { p_game_identifier: gameIdentifier, p_reward: reward }));
+      return response(200, { ok: true, game });
     } catch (error) { throw friendlyDatabaseError(error); }
   }
 

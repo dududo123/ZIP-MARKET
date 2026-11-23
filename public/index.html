@@ -9,12 +9,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
   <link href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" rel="stylesheet">
-  <link rel="stylesheet" href="/styles.css?v=8.9.0">
+  <link rel="stylesheet" href="/styles.css?v=9.0.0">
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
   <script defer src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <script defer src="/api-response.js?v=8.9.0"></script>
-  <script defer src="/qr-payload.js?v=8.9.0"></script>
-  <script defer src="/app.js?v=8.9.0"></script>
+  <script defer src="/api-response.js?v=9.0.0"></script>
+  <script defer src="/qr-payload.js?v=9.0.0"></script>
+  <script defer src="/app.js?v=9.0.0"></script>
 </head>
 <body>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
@@ -124,10 +124,23 @@
 
           <section id="games-admin-tab" class="admin-tab hidden">
             <div class="section-heading"><div><p class="eyebrow">GAME</p><h2>게임 관리</h2></div></div>
-            <form id="game-create-form" class="paper-card inline-form">
+            <form id="game-create-form" class="paper-card game-create-form">
               <label>게임 이름<input name="name" required placeholder="새 게임"></label>
-               <label>이미지 주소 (선택)<input name="imageUrl" value="/assets/game-default.webp" placeholder="/assets/game-default.webp"></label>
-              <button class="primary" type="submit">게임 추가</button>
+              <div class="reward-create-field">
+                <label for="game-create-reward">완료 보상 크레딧</label>
+                <div class="reward-presets" aria-label="보상 빠른 선택">
+                  <button type="button" data-reward-preset="50">50 C</button>
+                  <button type="button" data-reward-preset="100" class="selected">100 C</button>
+                  <button type="button" data-reward-preset="200">200 C</button>
+                  <button type="button" data-reward-preset="300">300 C</button>
+                  <button type="button" data-reward-preset="500">500 C</button>
+                </div>
+                <label class="direct-reward-label" for="game-create-reward">직접 입력 (자유 숫자)</label>
+                <div class="credit-input-wrap"><input id="game-create-reward" name="reward" type="number" inputmode="numeric" min="0" step="1" value="100" required aria-describedby="game-reward-help"><span>C</span></div>
+                <small id="game-reward-help" class="help">프리셋을 누르거나 원하는 정수 금액을 직접 입력할 수 있습니다.</small>
+              </div>
+              <label>이미지 주소 (선택)<input name="imageUrl" value="/assets/game-default.webp" placeholder="/assets/game-default.webp"></label>
+              <button class="primary game-create-submit" type="submit">게임 추가</button>
             </form>
             <div id="admin-games" class="image-card-grid games-grid"></div>
           </section>
