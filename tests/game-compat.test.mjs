@@ -31,7 +31,7 @@ assert.match(sql,/create trigger zip_market_game_completion_compat_trg/i);
 assert.match(sql,/new\.reward := greatest\(coalesce\(new\.reward, new\.rewarded_amount, 0\)/i);
 assert.match(sql,/new\.rewarded_amount := greatest\(coalesce\(new\.rewarded_amount, new\.reward, 0\)/i);
 const completionSql=sql.slice(sql.indexOf('create function public.zip_market_complete_game'),sql.indexOf('-- Compatibility aliases'));
-assert.match(completionSql,/where id::text = btrim\(p_game_id\)[\s\S]*or lower\(slug\) = lower\(btrim\(p_game_id\)\)/i,'game must resolve by public ID or slug');
+assert.match(completionSql,/where id::text = btrim\(p_game_id\)[\s\S]*or lower\(slug\) = lower\(btrim\(p_game_id\)\)[\s\S]*or lower\(public_id::text\) = lower\(btrim\(p_game_id\)\)/i,'game must resolve by ID, slug or public_id');
 assert.match(completionSql,/participant_id, game_id, reward, rewarded_amount, created_at, completed_at/i,'completion insert must populate old and new required columns');
 assert.match(completionSql,/'participant', jsonb_build_object[\s\S]*'credit_balance', v_person\.credit_balance/i,'updated participant state missing');
 assert.ok(completionSql.indexOf('insert into public.game_completions')<completionSql.indexOf('update public.participants'),'completion must be reserved before credit');
@@ -41,7 +41,7 @@ assert.ok(completionSql.indexOf('update public.participants')<completionSql.inde
 function completeGameAtomic(db,{participantId,gamePublicId}){
   const snapshot=structuredClone(db);
   try{
-    const game=db.games.find(item=>String(item.id)===gamePublicId||item.slug.toLowerCase()===gamePublicId.toLowerCase());
+    const game=db.games.find(item=>[item.id,item.slug,item.public_id].some(value=>String(value).toLowerCase()===gamePublicId.toLowerCase()));
     if(!game)throw new Error('GAME_NOT_FOUND');
     const participant=db.participants.find(item=>item.id===participantId);
     if(!participant)throw new Error('PARTICIPANT_NOT_FOUND');
@@ -54,8 +54,8 @@ function completeGameAtomic(db,{participantId,gamePublicId}){
   }catch(error){Object.keys(db).forEach(key=>{db[key]=snapshot[key];});throw error;}
 }
 for(const variant of [
-  {id:'balloon',slug:'balloon'},
-  {id:'22222222-2222-2222-2222-222222222222',slug:'balloon'}
+  {id:'balloon',slug:'balloon',public_id:'game-balloon'},
+  {id:'22222222-2222-2222-2222-222222222222',slug:'balloon',public_id:'game-balloon'}
 ]){
   const db={games:[{...variant,name:'풍선 튕기기',reward:100}],participants:[{id:'p1',credit_balance:1000,credits:1000}],completions:[],transactions:[]};
   const result=completeGameAtomic(db,{participantId:'p1',gamePublicId:'balloon'});
@@ -71,7 +71,12 @@ for(const variant of [
 // duplicate-name lock/check, and API RPC use (never a direct null-ID insert).
 const createSql=sql.slice(sql.indexOf('create function public.zip_market_admin_create_game'),sql.indexOf('create function public.zip_market_complete_game'));
 assert.match(createSql,/if v_id_udt = 'uuid'[\s\S]*elsif v_id_udt in \('int2', 'int4', 'int8', 'numeric'\)[\s\S]*else[\s\S]*v_id_text := v_slug/i);
-assert.match(createSql,/'id', v_id_text[\s\S]*'slug', v_slug[\s\S]*'active', true[\s\S]*'deleted', false/i);
+assert.match(createSql,/'id', v_id_text[\s\S]*'slug', v_slug[\s\S]*'active', true[\s\S]*'builtin', false[\s\S]*'deleted', false/i);
+assert.match(createSql,/column_name in \('public_id', 'public_slug', 'game_key', 'game_code', 'identifier'\)/i);
+assert.match(createSql,/is_nullable = 'YES'[\s\S]*column_default is not null[\s\S]*ZIP_MARKET_UNSUPPORTED_GAMES_REQUIRED_COLUMN/i,'unknown NOT NULL columns must be filled or fail fast');
+assert.match(createSql,/v_insert_columns[\s\S]*jsonb_populate_record\(null::public\.games, \$1\)[\s\S]*returning \*/i,'dynamic insert must preserve defaults while filling compatible columns');
+assert.match(sql,/alter table public\.games alter column builtin set default false[\s\S]*alter table public\.games alter column builtin set not null/i);
+assert.match(sql,/ZIP_MARKET_GAMES_REQUIRED_COLUMNS_INVALID[\s\S]*ZIP_MARKET_GAMES_REQUIRED_VALUES_NULL/i);
 assert.match(createSql,/GAME_NAME_ALREADY_EXISTS/);
 assert.match(api,/rpc\('zip_market_admin_create_game', \{ p_name: name, p_image_url: imageUrl, p_reward: reward \}\)/);
 const createRoute=api.slice(api.indexOf("path === '/admin/games'"),api.indexOf('const gameDelete'));
@@ -79,9 +84,9 @@ assert.doesNotMatch(createRoute,/supabase\('games\?/,'game API must not directly
 function makeGame(idType,name){
   const slug=`game-${createHash('md5').update(name.toLowerCase()).digest('hex').slice(0,8)}`;
   const id=idType==='uuid'?'33333333-3333-4333-8333-333333333333':slug;
-  return {id,slug,name,title:name,image_url:'/assets/game-default.webp',image:'/assets/game-default.webp',reward:100,points:100,active:true,is_active:true,deleted:false,is_deleted:false,created_at:'now',updated_at:'now'};
+  return {id,slug,public_id:slug,name,title:name,image_url:'/assets/game-default.webp',image:'/assets/game-default.webp',reward:100,points:100,active:true,is_active:true,builtin:false,deleted:false,is_deleted:false,created_at:'now',updated_at:'now'};
 }
-for(const idType of ['text','uuid']){const game=makeGame(idType,'ORAC 게임');assert.ok(game.id);for(const key of ['slug','name','title','image_url','image','reward','points','active','is_active','deleted','is_deleted','created_at','updated_at'])assert.notEqual(game[key],null,`${idType}: ${key}`);}
+for(const idType of ['text','uuid']){const game=makeGame(idType,'ORAC 게임');assert.ok(game.id);for(const key of ['slug','public_id','name','title','image_url','image','reward','points','active','is_active','builtin','deleted','is_deleted','created_at','updated_at'])assert.notEqual(game[key],null,`${idType}: ${key}`);}
 
 // Password mutation stays persistent and frontend resets the captured real form.
 assert.match(sql,/insert into public\.app_settings\(key, value, updated_at\)[\s\S]*on conflict \(key\) do update[\s\S]*value = excluded\.value/i);

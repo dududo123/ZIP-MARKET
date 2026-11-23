@@ -1,86 +1,76 @@
-# ZIP! MARKET v8.7.0 — 게임 DB 호환성·관리자 비밀번호 최종 복구
+# ZIP! MARKET v8.8.0 — 게임 생성·완료 QR 호환성 복구
 
-v8.6에서 정상화한 로그인, 참가자 등록, Excel 등록, 결제 QR, 직접 크레딧 결제, 결제 멱등성, 카메라 자동 시작, 게임 카드 스캔, 삭제, 내역, 뒤로가기, 폰트와 반응형 이미지를 유지하면서 운영 DB에서 확인된 네 가지 오류를 수정한 전체 배포 프로젝트입니다.
+운영 화면에서 확인된 `games.builtin NOT NULL` 생성 실패와, 올바른 게임 완료 QR을 스캔해도 “해당 게임의 QR 코드가 아닙니다”라고 거부되는 문제를 함께 수정한 Netlify 전체 프로젝트입니다. 기존 로그인, 참가자 단일/Excel 등록, 비밀번호 변경, 결제 QR, 직접 크레딧 결제, 삭제, 사용내역, 뒤로가기, 폰트, 반응형 이미지와 기본 게임 이미지 기능은 유지합니다.
 
-## v8.7 수정 사항
+## 핵심 수정
 
-### 1. 게임 완료 및 보상
-- 운영 DB의 기존 필수 열 `game_completions.reward`와 신규 열 `rewarded_amount`를 모두 추가·백필·동기화합니다.
-- 완료 기록에 `participant_id`, 실제 `game_id`, `reward`, `rewarded_amount`, `created_at`, `completed_at`을 모두 기록합니다.
-- 게임은 기존 문자형 ID(`balloon` 등), UUID ID 또는 `slug`로 찾습니다.
-- 참가자 행 잠금 → 중복 완료 검사 → 완료 기록 → 잔액 증가 → 거래 기록을 하나의 PostgreSQL RPC 트랜잭션으로 처리합니다.
-- 중복 또는 중간 오류가 발생하면 완료·잔액·거래가 전부 롤백됩니다.
-- 성공 응답에는 갱신된 참가자 ID, 사번, 이름과 `credit_balance`가 포함됩니다.
+### 1. 구형·신형 `games` 스키마에서 안전한 게임 생성
 
-### 2. 관리자 비밀번호
-- 비동기 요청 전에 실제 `#admin-password-form`을 보관하고, 성공 후 그 폼의 두 비밀번호 입력값을 직접 비웁니다.
-- 폼을 찾지 못하면 예외 대신 안내 메시지를 표시합니다.
-- 변경 비밀번호는 `app_settings.admin_password`에 bcrypt로 저장됩니다.
-- `INITIAL_ADMIN_PASSWORD`는 최초 생성에만 사용되며, 변경된 비밀번호를 되돌리는 복구 로그인으로 사용되지 않습니다.
+- 안전 복구 SQL이 `id`, `name`, `reward`, `image_url`, `active`, `builtin=false`, `slug`, `public_id`, `created_at`, `updated_at`을 백필하고 필수 열로 검증합니다.
+- 기본 이미지는 API·SQL·화면 모두 정확히 `/assets/game-default.webp`를 사용합니다.
+- `zip_market_admin_create_game` RPC는 실제 `games.id` 타입(UUID, 문자형, 숫자형)을 확인해 ID를 생성합니다.
+- RPC는 `name/title`, `reward/points`, `image_url/image`, 활성·삭제 플래그, `builtin=false`, 공개 식별자와 타임스탬프를 실제 존재하는 열에 함께 기록합니다.
+- 추가 `NOT NULL` 열은 기본값이 있으면 PostgreSQL 기본값을 보존하고, 기본값이 없으면 자료형에 맞는 안전한 호환값을 채웁니다. 지원할 수 없는 사용자 정의 필수 자료형은 NULL INSERT 대신 명확한 설치 오류로 중단합니다.
+- 기존 행은 삭제하지 않으며 같은 이름의 동시 생성은 중복 보상 없이 안전하게 거절합니다.
 
-### 3. 신규 게임 기본 이미지
-- 제공된 ORAC 캐릭터 4명이 `GAME` 노트북 주위에 있는 파일을 정확히 `public/assets/game-default.webp`로 포함했습니다.
-- 파일 SHA-256: `7a7425587a79b889cbec7f7dd6ce892394ae48dad036b57082780f55a4c9a144`
-- API와 관리자 입력 기본값은 모두 `/assets/game-default.webp`입니다.
-- 기존 `/assets/game-default.svg`, PNG/JPG 및 기타 default fallback 경로는 안전 복구 SQL 실행 시 `/assets/game-default.webp`로 바뀝니다.
-- 화면에서는 `?v=8.7.0`을 붙이고, Netlify는 이 파일을 `must-revalidate`로 제공해 이전 이미지 캐시를 방지합니다.
+### 2. 관리자 QR ↔ 사용자 스캐너 계약 통일
 
-### 4. 게임 생성
-- API의 직접 `games` INSERT를 제거하고 `zip_market_admin_create_game` RPC를 사용합니다.
-- RPC가 운영 DB의 실제 `games.id` 타입을 확인합니다.
-  - UUID 스키마: UUID 생성
-  - 문자형 구형 스키마: 안정적인 고유 slug 사용
-  - 숫자형 스키마: 트랜잭션 잠금 후 다음 ID 생성
-- `slug`, 이름/제목, 이미지 열, 보상/포인트, 활성/삭제 플래그와 타임스탬프를 구형·신형 호환 열에 함께 기록합니다.
-- 같은 이름의 동시 생성은 advisory lock으로 직렬화한 뒤 명확한 중복 오류를 반환합니다.
+- 새 관리자 완료 QR은 `ZIPMARKET|GAME|<식별자>` 형식으로 생성합니다.
+- 스캐너는 현재 형식뿐 아니라 기존 compact, JSON, URL, `GAME:<id>`, `ZIP_MARKET_GAME:<id>` 형식을 계속 읽습니다.
+- `gameId`, `game_id`, `id`, `slug`, `publicId`, `public_id`, UUID와 문자 ID를 정규화합니다.
+- 사용자가 선택한 게임은 서버에서 받은 `id + slug + public_id` 별칭 전체와 비교하므로, QR이 다른 세대의 식별자를 사용해도 같은 실제 게임이면 통과합니다.
+- 결제 QR 파서는 의도적으로 완화하지 않아 기존 결제 안전성을 유지합니다.
 
-## 적용 순서 — SQL을 먼저 실행하세요
+### 3. 완료·보상·중복 차단
 
-### 1. Supabase 안전 복구 SQL
+- 완료 RPC는 `id`, `slug`, `public_id` 중 어느 식별자로도 실제 게임을 찾습니다.
+- 완료 기록, 보상 크레딧, 거래내역은 하나의 PostgreSQL 트랜잭션에서 처리됩니다.
+- 같은 참가자·게임 조합은 한 번만 보상되며 중간 오류 시 전체 작업이 롤백됩니다.
+
+## 적용 순서 — 반드시 SQL이 먼저입니다
+
 1. Supabase → **SQL Editor** → **New query**
-2. 별도 제공된 `ZIP_MARKET_v8.7_SAFE_REPAIR.sql` 또는 프로젝트의 `supabase/schema-repair.sql` 전체 복사
-3. 새 쿼리에 붙여넣고 아무 텍스트도 선택하지 않은 상태로 **Run**
-4. 마지막 결과에서 `schema_version = 8.7.0`과 10개 RPC를 확인
-
-SQL은 `DROP TABLE`, `DELETE FROM`, `TRUNCATE`를 사용하지 않습니다. 참가자·게임·거래·완료 데이터를 삭제하지 않고 열, 기본값, 트리거, RPC와 권한만 비파괴 방식으로 보완합니다. 마지막 단계에서 필수 완료 열, 기본 이미지 경로, 호환 트리거, RPC 반환형과 권한을 DB 카탈로그로 자체 검증합니다.
-
-### 2. GitHub와 Netlify
-1. ZIP을 풀고 GitHub 저장소 파일을 v8.7 전체 프로젝트로 교체합니다.
-2. `.env.example`은 올려도 되지만 실제 `.env`는 올리지 않습니다.
-3. 기존 Netlify 환경변수를 유지합니다.
+2. 별도 제공된 `ZIP_MARKET_v8.8_SAFE_REPAIR.sql` 전체를 붙여넣고 **Run**
+3. 마지막 결과에서 `schema_version = 8.8.0`과 10개 RPC를 확인
+4. ZIP을 풀어 GitHub 저장소 파일 전체를 교체하고 Commit
+5. `.env.example`은 업로드해도 되지만 실제 `.env`는 업로드하지 않음
+6. 기존 Netlify 환경변수 유지
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - `JWT_SECRET`
    - `INITIAL_ADMIN_PASSWORD`
-4. Netlify에서 **Clear cache and deploy site**를 한 번 실행합니다.
+7. Netlify에서 **Clear cache and deploy site** 실행
+8. `/api/health` 확인
 
-### 3. 배포 확인
-
-`/api/health` 예상 핵심 값:
+예상 핵심 응답:
 
 ```json
 {
   "ok": true,
   "database": true,
-  "schema": "zip-market-v8.7",
-  "version": "8.7.0"
+  "schema": "zip-market-v8.8",
+  "version": "8.8.0"
 }
 ```
 
-권장 순서:
-1. 관리자 로그인
-2. 관리자 비밀번호 변경 → 입력 두 칸이 비워지는지 확인 → 로그아웃 → 새 비밀번호 로그인
-3. 새 게임 생성 → ID 오류 없이 ORAC 기본 이미지 표시 확인
-4. 동일 게임 이름 재등록 → 명확한 중복 안내 확인
-5. 게임 완료 QR 생성·스캔 → 완료 표시, 1회 보상과 거래내역 확인
-6. 같은 QR 재스캔 → 추가 보상 없이 이미 완료 안내 확인
-7. 결제 QR 및 100/200/300C 직접 결제가 계속 정상인지 확인
+## 배포 후 점검 순서
 
-## 검증 명령
+1. 관리자·사용자 로그인
+2. 기존 참가자 유지, 단일 등록과 Excel 일괄등록
+3. 새 게임 생성 및 `/assets/game-default.webp` 표시
+4. 관리자에서 기존 게임과 새 게임의 완료 QR 생성
+5. 사용자에서 해당 게임 카드를 누른 뒤 QR 스캔
+6. 완료 표시, 보상 크레딧, 거래내역 확인
+7. 같은 QR 재스캔 시 추가 보상 차단 확인
+8. 결제 QR과 직접 100/200/300C 결제 확인
+9. 관리자 비밀번호 변경 후 새 비밀번호 재로그인
+10. 참가자·게임 삭제, 뒤로가기와 반응형 이미지 확인
+
+## 로컬 검증
 
 ```bash
-npm test
 npm run check
+npm test
 ```
 
-테스트는 구형 문자 ID·신형 UUID ID, `reward`/`rewarded_amount` 열 조합, 게임 완료 원자 처리와 중복 롤백, 생성 ID 비NULL, 중복 이름, 관리자 비밀번호 변경 후 로그인, 실제 DOM 입력 초기화, 기본 이미지 경로·내용·SHA-256·캐시, API/RPC 계약, health/라우팅, SQL·JavaScript 구문, 참가자/관리자 로그인, 단일/Excel 등록, 결제 QR, 직접 결제, 삭제, 내역, 뒤로가기, 폰트와 반응형 이미지를 포함합니다.
+테스트는 API/RPC 서명, old/new `games` 필수 열, UUID·문자·숫자 ID 생성, 추가 NOT NULL 처리, 현재·레거시 QR 왕복, 선택 게임 별칭 검증, 완료·보상·거래의 원자성, 중복 보상 롤백, 기본 이미지 내용과 경로, JavaScript/SQL 구조, 로그인·등록·결제·삭제·내역·내비게이션·폰트·반응형 이미지 회귀를 포함합니다.

@@ -57,7 +57,7 @@ const request=(path,method='GET',body,token,direct=false)=>new Request(
 for (const direct of [false,true]) {
   const res=await handler(request('/health','GET',undefined,undefined,direct));
   assert.ok(res instanceof Response);assert.equal(res.status,200);
-  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.7');assert.equal(body.version,'8.7.0');
+  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.8');assert.equal(body.version,'8.8.0');
 }
 assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_initialize_admin')).body,{p_initial_password:'admin1234'});
 
@@ -85,6 +85,9 @@ assert.equal(invalidPayment.status,400);assert.equal((await invalidPayment.json(
 const completion=await handler(request('/participant/complete-game','POST',{gameId},userBody.token));
 assert.equal(completion.status,200);
 assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_complete_game')).body,{p_participant_id:participantId,p_game_id:gameId});
+const legacyCompletion=await handler(request('/participant/complete-game','POST',{public_id:'game-balloon'},userBody.token));
+assert.equal(legacyCompletion.status,200);
+assert.deepEqual(calls.filter(c=>c.url.endsWith('/rpc/zip_market_complete_game')).at(-1).body,{p_participant_id:participantId,p_game_id:'game-balloon'});
 
 // Admin create/grant/password and both deletion routes.
 const createParticipant=await handler(request('/admin/participants','POST',{employeeNo:'NEW001',name:'신규',password:'1234',initialCredit:500},adminBody.token));

@@ -81,7 +81,7 @@ assert.match(repair, /Pass 1:[\s\S]*Pass 2:/i,'bulk RPC must validate all rows b
 assert.match(repair, /create function public\.zip_market_admin_create_participants[\s\S]*?return jsonb_build_object\('createdCount'/i,'bulk RPC return shape missing');
 assert.doesNotMatch(repair, /not\s+v_valid\s+and\s+p_password\s*=\s*p_initial_password/i,'bootstrap password must not overwrite a changed administrator password');
 assert.match(repair, /zip_market_pay_credit[\s\S]*p_request_id[\s\S]*'idempotent'/i,'payment RPC must be idempotent by request ID');
-assert.match(repair, /zip_market_complete_game[\s\S]*from public\.games[\s\S]*where id::text = btrim\(p_game_id\)/i,'game completion must accept legacy text and UUID IDs');
-assert.match(repair, /zip_market_admin_create_game[\s\S]*jsonb_populate_record\(null::public\.games/i,'game creation must populate the real old/new row type');
+assert.match(repair, /zip_market_complete_game[\s\S]*where id::text = btrim\(p_game_id\)[\s\S]*public_id::text/i,'game completion must accept ID, slug and public_id');
+assert.match(repair, /zip_market_admin_create_game[\s\S]*'builtin', false[\s\S]*jsonb_populate_record\(null::public\.games/i,'game creation must populate the real old/new row type including builtin');
 assert.equal(schema.split('\n').slice(1).join('\n'), repair.split('\n').slice(1).join('\n'), 'schema.sql and repair SQL logic diverged');
 console.log('rpc-contract.test: parsed ten API RPC contracts and both SQL files; signatures, parameters, returns, grants, revokes and cache refresh match exactly');

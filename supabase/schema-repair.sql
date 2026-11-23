@@ -1,4 +1,4 @@
--- ZIP! MARKET v8.7.0 — SAFE SUPABASE GAME/PASSWORD COMPATIBILITY REPAIR
+-- ZIP! MARKET v8.8.0 — SAFE SUPABASE GAME/PASSWORD COMPATIBILITY REPAIR
 -- Run this entire file once in Supabase > SQL Editor > New query.
 -- It preserves rows. It never drops tables and never deletes participant, game,
 -- transaction, completion, or setting data. It only replaces ZIP! MARKET RPCs.
@@ -29,11 +29,15 @@ create table if not exists public.participants (
 
 create table if not exists public.games (
   id uuid primary key default gen_random_uuid(),
-  slug text,
+  slug text not null,
+  public_id text not null,
   name text not null,
   image_url text not null default '/assets/game-default.webp',
   reward integer not null default 100,
-  created_at timestamptz not null default now()
+  active boolean not null default true,
+  builtin boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
 create table if not exists public.transactions (
@@ -73,6 +77,7 @@ alter table public.participants add column if not exists updated_at timestamptz 
 
 alter table public.games add column if not exists name text;
 alter table public.games add column if not exists slug text;
+alter table public.games add column if not exists public_id text;
 alter table public.games add column if not exists title text;
 alter table public.games add column if not exists image_url text;
 alter table public.games add column if not exists image text;
@@ -80,6 +85,7 @@ alter table public.games add column if not exists reward integer;
 alter table public.games add column if not exists points integer;
 alter table public.games add column if not exists active boolean;
 alter table public.games add column if not exists is_active boolean;
+alter table public.games add column if not exists builtin boolean;
 alter table public.games add column if not exists deleted boolean;
 alter table public.games add column if not exists is_deleted boolean;
 alter table public.games add column if not exists created_at timestamptz default now();
@@ -149,6 +155,28 @@ update public.games set updated_at = coalesce(updated_at, created_at, now()) whe
 update public.games
    set slug = 'game-' || substr(md5(id::text || ':' || name), 1, 12)
  where slug is null or btrim(slug) = '';
+update public.games set builtin = false where builtin is null;
+
+-- public_id was introduced by one production generation. Keep it populated
+-- without assuming that an older installation chose text rather than UUID.
+do $$
+declare
+  v_public_id_udt text;
+begin
+  select udt_name into v_public_id_udt
+    from information_schema.columns
+   where table_schema = 'public' and table_name = 'games' and column_name = 'public_id';
+  if v_public_id_udt = 'uuid' then
+    execute 'update public.games set public_id = gen_random_uuid() where public_id is null';
+  elsif v_public_id_udt in ('text', 'varchar', 'bpchar', 'citext') then
+    execute $sql$update public.games set public_id = coalesce(nullif(btrim(public_id::text), ''), slug, id::text) where public_id is null or btrim(public_id::text) = ''$sql$;
+  elsif v_public_id_udt in ('int2', 'int4', 'int8', 'numeric') then
+    execute 'update public.games set public_id = id where public_id is null';
+  else
+    raise exception 'ZIP_MARKET_UNSUPPORTED_GAMES_PUBLIC_ID_TYPE: %', v_public_id_udt;
+  end if;
+end;
+$$;
 
 update public.transactions
    set kind = case
@@ -177,8 +205,20 @@ alter table public.games alter column reward set default 100;
 alter table public.games alter column points set default 100;
 alter table public.games alter column active set default true;
 alter table public.games alter column is_active set default true;
+alter table public.games alter column builtin set default false;
 alter table public.games alter column deleted set default false;
 alter table public.games alter column is_deleted set default false;
+alter table public.games alter column created_at set default now();
+alter table public.games alter column updated_at set default now();
+alter table public.games alter column name set not null;
+alter table public.games alter column slug set not null;
+alter table public.games alter column public_id set not null;
+alter table public.games alter column image_url set not null;
+alter table public.games alter column reward set not null;
+alter table public.games alter column active set not null;
+alter table public.games alter column builtin set not null;
+alter table public.games alter column created_at set not null;
+alter table public.games alter column updated_at set not null;
 alter table public.transactions alter column type set default 'payment';
 alter table public.transactions alter column kind set default 'payment';
 alter table public.transactions alter column label set default '';
@@ -203,6 +243,7 @@ create unique index if not exists transactions_participant_reference_uidx on pub
 create index if not exists game_completions_participant_idx on public.game_completions(participant_id);
 create unique index if not exists game_completions_participant_game_uidx on public.game_completions(participant_id, game_id);
 create index if not exists games_slug_idx on public.games(slug);
+create index if not exists games_public_id_idx on public.games(public_id);
 
 -- Supply an ID default for both schema generations. Production v5/v6 used a
 -- text slug ID, while newer clean installs use UUID. The game-creation RPC also
@@ -218,6 +259,15 @@ begin
     execute 'alter table public.games alter column id set default gen_random_uuid()';
   elsif v_udt in ('text', 'varchar', 'bpchar') then
     execute $sql$alter table public.games alter column id set default ('game-' || replace(gen_random_uuid()::text, '-', ''))$sql$;
+  end if;
+
+  select udt_name into v_udt
+    from information_schema.columns
+   where table_schema = 'public' and table_name = 'games' and column_name = 'public_id';
+  if v_udt = 'uuid' then
+    execute 'alter table public.games alter column public_id set default gen_random_uuid()';
+  elsif v_udt in ('text', 'varchar', 'bpchar', 'citext') then
+    execute $sql$alter table public.games alter column public_id set default ('game-' || replace(gen_random_uuid()::text, '-', ''))$sql$;
   end if;
 end;
 $$;
@@ -239,6 +289,7 @@ begin
   new.points := greatest(coalesce(new.points, new.reward, 100), 0);
   new.active := coalesce(new.active, new.is_active, true);
   new.is_active := coalesce(new.is_active, new.active, true);
+  new.builtin := coalesce(new.builtin, false);
   new.deleted := coalesce(new.deleted, new.is_deleted, false);
   new.is_deleted := coalesce(new.is_deleted, new.deleted, false);
   new.slug := coalesce(nullif(btrim(new.slug), ''), 'game-' || substr(md5(coalesce(new.id::text, '') || ':' || new.name), 1, 12));
@@ -273,7 +324,7 @@ before insert or update on public.game_completions
 for each row execute function public.zip_market_sync_game_completion_compat();
 
 -- Synchronize all known transaction column generations. This trigger protects
--- old Functions and future direct inserts as well as the v8.7 RPCs.
+-- old Functions and future direct inserts as well as the v8.8 RPCs.
 create or replace function public.zip_market_sync_transaction_compat()
 returns trigger
 language plpgsql
@@ -698,16 +749,20 @@ declare
   v_slug text;
   v_id_udt text;
   v_id_text text;
+  v_id_uuid uuid := gen_random_uuid();
   v_next_number bigint;
   v_counter integer := 1;
   v_payload jsonb;
+  v_insert_columns text;
+  v_enum_value text;
+  v_column record;
   v_game public.games%rowtype;
 begin
   if v_name = '' then raise exception 'GAME_NAME_REQUIRED' using errcode = '22023'; end if;
   if v_reward < 0 then raise exception 'INVALID_GAME_REWARD' using errcode = '22023'; end if;
 
-  -- Serialize equal names so two concurrent administrator requests cannot make
-  -- duplicate games even on a legacy database without a case-insensitive index.
+  -- Serialize equal names so concurrent administrator requests cannot create
+  -- duplicate games even on an old database without a case-insensitive index.
   perform pg_advisory_xact_lock(hashtextextended('zip-market-game-name:' || lower(v_name), 0));
   if exists (select 1 from public.games where lower(btrim(name)) = lower(v_name)) then
     raise exception 'GAME_NAME_ALREADY_EXISTS' using errcode = '23505';
@@ -722,7 +777,7 @@ begin
   if v_slug_base = '' then v_slug_base := 'game'; end if;
   v_slug_base := left(v_slug_base, 40) || '-' || substr(md5(lower(v_name)), 1, 8);
   v_slug := v_slug_base;
-  while exists (select 1 from public.games where slug = v_slug or id::text = v_slug) loop
+  while exists (select 1 from public.games where slug = v_slug or id::text = v_slug or public_id::text = v_slug) loop
     v_counter := v_counter + 1;
     v_slug := v_slug_base || '-' || v_counter::text;
   end loop;
@@ -731,7 +786,7 @@ begin
     from information_schema.columns
    where table_schema = 'public' and table_name = 'games' and column_name = 'id';
   if v_id_udt = 'uuid' then
-    v_id_text := gen_random_uuid()::text;
+    v_id_text := v_id_uuid::text;
   elsif v_id_udt in ('int2', 'int4', 'int8', 'numeric') then
     perform pg_advisory_xact_lock(hashtextextended('zip-market-game-numeric-id', 0));
     execute 'select coalesce(max(id::bigint), 0) + 1 from public.games' into v_next_number;
@@ -740,6 +795,8 @@ begin
     v_id_text := v_slug;
   end if;
 
+  -- Include every known old/new games contract field. The dynamic insert below
+  -- omits unrelated nullable/defaulted columns so PostgreSQL defaults still run.
   v_payload := jsonb_build_object(
     'id', v_id_text,
     'slug', v_slug,
@@ -751,17 +808,104 @@ begin
     'points', v_reward,
     'active', true,
     'is_active', true,
+    'builtin', false,
+    'is_builtin', false,
     'deleted', false,
     'is_deleted', false,
     'created_at', now(),
     'updated_at', now()
   );
 
-  insert into public.games
-  select (jsonb_populate_record(null::public.games, v_payload)).*
-  returning * into v_game;
+  -- public_id/public_slug changed type and name between deployed generations.
+  -- Also supply a conservative value for any additional NOT NULL column that
+  -- has no default, rather than jsonb_populate_record turning it into NULL.
+  for v_column in
+    select column_name, data_type, udt_name, is_nullable, column_default,
+           is_identity, is_generated, ordinal_position
+      from information_schema.columns
+     where table_schema = 'public' and table_name = 'games'
+     order by ordinal_position
+  loop
+    if v_column.is_identity = 'YES' or v_column.is_generated <> 'NEVER' then
+      continue;
+    end if;
 
-  return to_jsonb(v_game) || jsonb_build_object('publicId', coalesce(v_game.slug, v_game.id::text));
+    if v_column.column_name in ('public_id', 'public_slug', 'game_key', 'game_code', 'identifier') then
+      if v_column.udt_name = 'uuid' then
+        v_payload := v_payload || jsonb_build_object(v_column.column_name, v_id_uuid::text);
+      elsif v_column.udt_name in ('int2', 'int4', 'int8', 'numeric') then
+        v_payload := v_payload || jsonb_build_object(v_column.column_name, coalesce(v_next_number, 0));
+      else
+        v_payload := v_payload || jsonb_build_object(v_column.column_name, v_slug);
+      end if;
+      continue;
+    end if;
+
+    if v_column.column_name = 'public' then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name,
+        case when v_column.udt_name = 'bool' then to_jsonb(true) else to_jsonb(v_slug) end);
+      continue;
+    end if;
+
+    if v_payload ? v_column.column_name
+       or v_column.is_nullable = 'YES'
+       or v_column.column_default is not null then
+      continue;
+    end if;
+
+    if v_column.udt_name in ('text', 'varchar', 'bpchar', 'citext', 'name') then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, '');
+    elsif v_column.udt_name = 'bool' then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, false);
+    elsif v_column.udt_name in ('int2', 'int4', 'int8', 'numeric', 'float4', 'float8', 'money') then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, 0);
+    elsif v_column.udt_name = 'uuid' then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, gen_random_uuid()::text);
+    elsif v_column.udt_name in ('timestamp', 'timestamptz') then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, now());
+    elsif v_column.udt_name = 'date' then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, current_date);
+    elsif v_column.udt_name = 'time' or v_column.udt_name = 'timetz' then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, current_time);
+    elsif v_column.udt_name in ('json', 'jsonb') then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, '{}'::jsonb);
+    elsif left(v_column.udt_name, 1) = '_' then
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, '[]'::jsonb);
+    else
+      select e.enumlabel into v_enum_value
+        from pg_type t join pg_enum e on e.enumtypid = t.oid
+       where t.typname = v_column.udt_name
+       order by e.enumsortorder
+       limit 1;
+      if v_enum_value is null then
+        raise exception 'ZIP_MARKET_UNSUPPORTED_GAMES_REQUIRED_COLUMN: % (%)', v_column.column_name, v_column.udt_name;
+      end if;
+      v_payload := v_payload || jsonb_build_object(v_column.column_name, v_enum_value);
+    end if;
+  end loop;
+
+  select string_agg(format('%I', c.column_name), ', ' order by c.ordinal_position)
+    into v_insert_columns
+    from information_schema.columns c
+   where c.table_schema = 'public'
+     and c.table_name = 'games'
+     and c.is_identity = 'NO'
+     and c.is_generated = 'NEVER'
+     and v_payload ? c.column_name;
+
+  if v_insert_columns is null then
+    raise exception 'ZIP_MARKET_GAMES_INSERT_COLUMNS_MISSING';
+  end if;
+
+  execute format(
+    'insert into public.games as g (%1$s) select %1$s from jsonb_populate_record(null::public.games, $1) as populated returning *',
+    v_insert_columns
+  ) into v_game using v_payload;
+
+  return to_jsonb(v_game) || jsonb_build_object(
+    'publicId', coalesce(v_game.public_id::text, v_game.slug, v_game.id::text),
+    'identifiers', jsonb_build_array(v_game.id::text, v_game.slug, v_game.public_id::text)
+  );
 exception
   when unique_violation then
     raise exception 'GAME_NAME_ALREADY_EXISTS' using errcode = '23505';
@@ -790,6 +934,7 @@ begin
     from public.games
    where id::text = btrim(p_game_id)
       or lower(slug) = lower(btrim(p_game_id))
+      or lower(public_id::text) = lower(btrim(p_game_id))
     limit 1;
   if not found then raise exception 'GAME_NOT_FOUND' using errcode = 'P0002'; end if;
   v_reward := greatest(coalesce(v_game.reward, 0), 0);
@@ -898,7 +1043,7 @@ grant execute on function public.zip_auth_admin(text, text) to service_role;
 grant execute on function public.zip_auth_participant(text, text) to service_role;
 
 insert into public.app_settings(key, value, updated_at)
-values ('schema_version', '8.7.0', now())
+values ('schema_version', '8.8.0', now())
 on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at;
 
 -- ---------------------------------------------------------------------------
@@ -970,6 +1115,28 @@ begin
        and column_name = 'rewarded_amount' and is_nullable = 'NO'
   ) then
     raise exception 'ZIP_MARKET_GAME_COMPLETION_COLUMNS_INVALID';
+  end if;
+
+  select array_agg(required.column_name) into v_missing
+    from (values
+      ('id'), ('name'), ('reward'), ('image_url'), ('active'), ('builtin'),
+      ('slug'), ('public_id'), ('created_at'), ('updated_at')
+    ) required(column_name)
+    left join information_schema.columns c
+      on c.table_schema = 'public'
+     and c.table_name = 'games'
+     and c.column_name = required.column_name
+     and c.is_nullable = 'NO'
+   where c.column_name is null;
+  if v_missing is not null then raise exception 'ZIP_MARKET_GAMES_REQUIRED_COLUMNS_INVALID: %', v_missing; end if;
+
+  if exists (
+    select 1 from public.games
+     where id is null or name is null or reward is null or image_url is null
+        or active is null or builtin is null or slug is null or public_id is null
+        or created_at is null or updated_at is null
+  ) then
+    raise exception 'ZIP_MARKET_GAMES_REQUIRED_VALUES_NULL';
   end if;
 
   if exists (

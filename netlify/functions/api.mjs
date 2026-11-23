@@ -1,6 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-const VERSION = '8.7.0';
+const VERSION = '8.8.0';
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -152,7 +152,7 @@ async function health() {
     adminCreatedNow: Boolean(initialized?.createdNow),
     transport: 'direct-rest',
     runtime: 'netlify-modern-response',
-    schema: 'zip-market-v8.7',
+    schema: 'zip-market-v8.8',
     version: VERSION
   };
 }
@@ -162,7 +162,7 @@ async function participantDashboard(participantId) {
   const [people, transactions, games, completions] = await Promise.all([
     query('participants', `select=id,employee_no,name,credit_balance,created_at&id=eq.${id}&limit=1`),
     query('transactions', `select=id,amount,type,description,balance_after,created_at&participant_id=eq.${id}&order=created_at.desc&limit=100`),
-    query('games', 'select=id,slug,name,image_url,reward,created_at&order=created_at.asc'),
+    query('games', 'select=id,slug,public_id,name,image_url,reward,active,builtin,created_at,updated_at&order=created_at.asc'),
     query('game_completions', `select=game_id,completed_at&participant_id=eq.${id}`)
   ]);
   if (!people?.[0]) throw new ApiError(404, 'PARTICIPANT_NOT_FOUND', '참가자를 찾을 수 없습니다.');
@@ -175,7 +175,7 @@ async function adminDashboard(search = '') {
     : '';
   const [participants, games] = await Promise.all([
     query('participants', `select=id,employee_no,name,credit_balance,created_at&order=created_at.desc${filter}`),
-    query('games', 'select=id,slug,name,image_url,reward,created_at&order=created_at.asc')
+    query('games', 'select=id,slug,public_id,name,image_url,reward,active,builtin,created_at,updated_at&order=created_at.asc')
   ]);
   return { participants: participants || [], games: games || [] };
 }
@@ -225,7 +225,7 @@ async function route(request) {
 
   if (method === 'POST' && path === '/participant/complete-game') {
     const auth = verifyToken(request, 'participant');
-    const gameId = String(body.gameId || '').trim();
+    const gameId = String(body.gameId ?? body.game_id ?? body.publicId ?? body.public_id ?? body.slug ?? body.id ?? '').trim();
     if (!gameId || gameId.length > 200) throw new ApiError(400, 'INVALID_GAME_ID', '게임 정보가 없습니다.');
     try {
       const result = await rpc('zip_market_complete_game', { p_participant_id: auth.sub, p_game_id: gameId });

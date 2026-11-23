@@ -24,6 +24,8 @@ assert.ok(app.includes('Html5Qrcode'),'iPhone-compatible QR scanner missing');
 assert.ok(app.includes("payload.type==='payment'")&&app.includes("payload.type==='game'"),'payment/game QR dispatch missing');
 assert.ok(app.includes('game-qr')&&app.includes('delete-game'),'game QR/delete controls missing');
 assert.ok(app.includes('game-card-button')&&app.includes('openScannerFor(card.dataset.gameId'),'game card must launch its QR scanner');
+assert.ok(app.includes('gameIdentifiers(game)')&&app.includes('gameQrMatchesSelected(payload.gameId)'),'selected game must verify ID, slug and public_id aliases');
+assert.ok(api.includes('select=id,slug,public_id,name,image_url,reward,active,builtin,created_at,updated_at'),'API must return all game identity aliases and required status fields');
 assert.ok(api.includes("'/participant/complete-game'")&&api.includes("'/admin/games'"),'game API routes missing');
 assert.match(schema,/create function public\.zip_market_complete_game[\s\S]*ALREADY_COMPLETED[\s\S]*when unique_violation[\s\S]*ALREADY_COMPLETED/i,'duplicate-safe game completion missing');
 

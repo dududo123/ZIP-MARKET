@@ -5,7 +5,7 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../public/qr-payload.js', import.meta.url), 'utf8');
 const context = { URL, globalThis: {} };
 vm.runInNewContext(source, context, { filename: 'qr-payload.js' });
-const { parse, serialize } = context.globalThis.ZipMarketQr;
+const { parse, serialize, normalizeGameId } = context.globalThis.ZipMarketQr;
 
 const paymentText = serialize({ type: 'payment', amount: 275, description: '플리마켓 결제' });
 assert.match(paymentText, /^ZIPMARKET\|PAY\|275\|/);
@@ -22,7 +22,26 @@ assert.equal(parse(JSON.stringify({ app: 'zip-market', v: 1, type: 'game', gameI
 assert.equal(parse(JSON.stringify({ app: 'ZIP! MARKET', type: 'payment', amount: 100, description: '100C' })).amount, 100);
 assert.equal(parse('zip-market://game?gameId=pingpong').gameId, 'pingpong');
 assert.equal(parse('https://example.test/qr?type=payment&amount=300&description=QR%20PAY').description, 'QR PAY');
+
+// Current and previously generated game-completion payloads remain valid.
+const legacyGameCases = new Map([
+  ['GAME:pingpong', 'pingpong'],
+  ['ZIP_MARKET_GAME:pingpong', 'pingpong'],
+  ['zipmarket:game:pingpong', 'pingpong'],
+  ['ZIP! MARKET|GAME_COMPLETE|pingpong', 'pingpong'],
+  [JSON.stringify({ type: 'game', id: 'pingpong' }), 'pingpong'],
+  [JSON.stringify({ kind: 'game_complete', public_id: 'pingpong' }), 'pingpong'],
+  [JSON.stringify({ app: 'zip_market', action: 'completion', game_slug: 'pingpong' }), 'pingpong'],
+  [JSON.stringify({ payload: JSON.stringify({ type: 'game', gameId: uuid }) }), uuid],
+  ['https://example.test/game/pingpong', 'pingpong']
+]);
+for (const [payload, expected] of legacyGameCases) assert.equal(parse(payload).gameId, expected, payload);
+assert.equal(normalizeGameId(' ZIPMARKET|GAME|pingpong '), 'pingpong');
+assert.equal(normalizeGameId('game_complete:pingpong'), 'pingpong');
+
+// Do not broaden payment parsing: an app marker is still required for payment.
 assert.throws(() => parse('https://example.test/not-a-market-code'), /ZIP! MARKET/);
 assert.throws(() => parse('{"type":"payment","amount":100}'), /ZIP! MARKET/);
+assert.throws(() => parse('PAY:100'), /ZIP! MARKET/);
 
-console.log('qr-payload.test: compact, JSON, URL, payment, UUID/text game IDs and rejection paths passed');
+console.log('qr-payload.test: current/legacy round trips, ID/slug/UUID normalization, payment safety and rejection paths passed');

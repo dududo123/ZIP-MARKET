@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const VERSION = '8.7.0';
+  const VERSION = '8.8.0';
   const DEFAULT_GAME_ASSET = '/assets/game-default.webp';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -10,7 +10,7 @@
     token: localStorage.getItem('zipMarketToken') || '', role: localStorage.getItem('zipMarketRole') || '',
     dashboard: null, admin: { participants: [], games: [] }, historyExpanded: false,
     modal: null, pendingAmount: 0, pendingDescription: '', paymentRequestId: '', paymentInFlight: false,
-    scanner: null, scannerStarting: false, scannerTargetGameId: '', scannerTargetGameName: ''
+    scanner: null, scannerStarting: false, scannerTargetGameId: '', scannerTargetGameIds: [], scannerTargetGameName: ''
   };
 
   let toastTimer;
@@ -166,7 +166,34 @@
     const normalized = /\/(?:game-)?default\.(?:svg|png|jpe?g|webp)$/i.test(clean) ? DEFAULT_GAME_ASSET : clean;
     return normalized.startsWith('/assets/') ? `${normalized}?v=${VERSION}` : value;
   }
-  function publicGameId(game) { return String(game?.slug || game?.id || ''); }
+  function normalizeGameIdentifier(value) {
+    const normalized = globalThis.ZipMarketQr?.normalizeGameId
+      ? globalThis.ZipMarketQr.normalizeGameId(value)
+      : String(value ?? '').trim();
+    return normalized.toLowerCase();
+  }
+  function gameIdentifiers(game) {
+    return [...new Set([
+      game?.id, game?.slug, game?.public_id, game?.publicId, game?.game_id, game?.gameId
+    ].map(value => String(value ?? '').trim()).filter(Boolean))];
+  }
+  function publicGameId(game) { return String(game?.public_id || game?.slug || game?.id || ''); }
+  function gameIdentifierAttributes(game) {
+    const values = gameIdentifiers(game);
+    return `data-game-id="${escapeHtml(publicGameId(game))}" data-game-identifiers="${escapeHtml(encodeURIComponent(JSON.stringify(values)))}"`;
+  }
+  function decodeGameIdentifiers(value, fallback = '') {
+    try {
+      const parsed = JSON.parse(decodeURIComponent(String(value || '')));
+      if (Array.isArray(parsed)) return [...new Set([...parsed, fallback].map(item => String(item ?? '').trim()).filter(Boolean))];
+    } catch { /* use the canonical fallback */ }
+    return String(fallback || '').trim() ? [String(fallback).trim()] : [];
+  }
+  function gameQrMatchesSelected(payloadGameId) {
+    if (!state.scannerTargetGameIds.length) return true;
+    const scanned = normalizeGameIdentifier(payloadGameId);
+    return Boolean(scanned) && state.scannerTargetGameIds.some(value => normalizeGameIdentifier(value) === scanned);
+  }
   function gameImage(game) {
     const key = `${game?.id || ''} ${game?.name || ''}`.toLowerCase();
     if (/ping|탁구/.test(key)) return cacheBustedAsset('/assets/game-pingpong.webp');
@@ -177,7 +204,7 @@
     const games = state.dashboard?.games || []; const completed = new Set((state.dashboard?.completions || []).map(x => x.game_id));
     $('#participant-games').innerHTML = games.length ? games.map(game => {
       const done = completed.has(game.id);
-      return `<button class="image-card game-card-button${done ? ' is-complete' : ''}" data-game-id="${escapeHtml(publicGameId(game))}" data-game-name="${escapeHtml(game.name)}" data-completed="${done}" type="button"><div class="image-frame"><img src="${escapeHtml(gameImage(game))}" alt="${escapeHtml(game.name)}" onerror="this.onerror=null;this.src='${DEFAULT_GAME_ASSET}?v=${VERSION}'"></div><div class="card-body"><strong>${escapeHtml(game.name)}</strong><p class="${done?'status-complete':'status-pending'}">${done?'✓ 완료':'눌러서 완료 QR 스캔'}</p></div></button>`;
+      return `<button class="image-card game-card-button${done ? ' is-complete' : ''}" ${gameIdentifierAttributes(game)} data-game-name="${escapeHtml(game.name)}" data-completed="${done}" type="button"><div class="image-frame"><img src="${escapeHtml(gameImage(game))}" alt="${escapeHtml(game.name)}" onerror="this.onerror=null;this.src='${DEFAULT_GAME_ASSET}?v=${VERSION}'"></div><div class="card-body"><strong>${escapeHtml(game.name)}</strong><p class="${done?'status-complete':'status-pending'}">${done?'✓ 완료':'눌러서 완료 QR 스캔'}</p></div></button>`;
     }).join('') : '<div class="empty">등록된 게임이 없습니다.</div>';
   }
 
@@ -191,7 +218,7 @@
     const people = state.admin.participants || [], games = state.admin.games || [];
     $('#participant-total').textContent = `${people.length}명`;
     $('#admin-participants').innerHTML = people.length ? people.map(person => `<article class="participant-item"><div><strong>${escapeHtml(person.name)}</strong><div class="participant-meta"><span>사번 ${escapeHtml(person.employee_no)}</span><span>${Number(person.credit_balance||0).toLocaleString()} C</span></div></div><div class="participant-actions"><button class="secondary small grant-credit" data-id="${person.id}" type="button">+100 C</button><button class="danger delete-participant" data-id="${person.id}" data-name="${escapeHtml(person.name)}" type="button">삭제</button></div></article>`).join('') : '<div class="empty">참가자가 없습니다.</div>';
-    $('#admin-games').innerHTML = games.length ? games.map(game => `<article class="image-card"><div class="image-frame"><img src="${escapeHtml(gameImage(game))}" alt="${escapeHtml(game.name)}" onerror="this.onerror=null;this.src='${DEFAULT_GAME_ASSET}?v=${VERSION}'"></div><div class="card-body"><strong>${escapeHtml(game.name)}</strong></div><div class="game-admin-actions"><button class="secondary game-qr" data-id="${escapeHtml(publicGameId(game))}" data-name="${escapeHtml(game.name)}" type="button">완료 QR</button><button class="danger delete-game" data-id="${escapeHtml(game.id)}" data-name="${escapeHtml(game.name)}" type="button">삭제</button></div></article>`).join('') : '<div class="empty">등록된 게임이 없습니다.</div>';
+    $('#admin-games').innerHTML = games.length ? games.map(game => `<article class="image-card"><div class="image-frame"><img src="${escapeHtml(gameImage(game))}" alt="${escapeHtml(game.name)}" onerror="this.onerror=null;this.src='${DEFAULT_GAME_ASSET}?v=${VERSION}'"></div><div class="card-body"><strong>${escapeHtml(game.name)}</strong></div><div class="game-admin-actions"><button class="secondary game-qr" data-id="${escapeHtml(publicGameId(game))}" data-game-identifiers="${escapeHtml(encodeURIComponent(JSON.stringify(gameIdentifiers(game))))}" data-name="${escapeHtml(game.name)}" type="button">완료 QR</button><button class="danger delete-game" data-id="${escapeHtml(game.id)}" data-name="${escapeHtml(game.name)}" type="button">삭제</button></div></article>`).join('') : '<div class="empty">등록된 게임이 없습니다.</div>';
   }
   function switchAdminTab(name) {
     $$('.admin-tab').forEach(el => el.classList.toggle('hidden', el.id !== `${name}-tab`));
@@ -244,8 +271,8 @@
     finally{state.scannerStarting=false;}
   }
   async function stopScanner(){ if(state.scanner){try{if(state.scanner.isScanning)await state.scanner.stop();await state.scanner.clear();}catch{}state.scanner=null;}state.scannerStarting=false;const b=$('#camera-start');if(b){b.textContent='카메라 다시 시도';b.disabled=false;b.classList.add('hidden');} }
-  async function openScannerFor(gameId='',gameName=''){
-    state.scannerTargetGameId=String(gameId||'');state.scannerTargetGameName=String(gameName||'');
+  async function openScannerFor(gameId='',gameName='',gameIds=[]){
+    state.scannerTargetGameId=String(gameId||'');state.scannerTargetGameIds=[...new Set([...(Array.isArray(gameIds)?gameIds:[]),state.scannerTargetGameId].map(value=>String(value||'').trim()).filter(Boolean))];state.scannerTargetGameName=String(gameName||'');
     $('#scanner-title').textContent=state.scannerTargetGameName?`${state.scannerTargetGameName} 완료 QR 스캔`:'QR 스캔';
     $('#scanner-help').textContent='카메라를 시작하는 중입니다…';
     openModal('scanner-modal');
@@ -254,7 +281,7 @@
   async function handleQr(text){
     try{const payload=globalThis.ZipMarketQr?.parse(text);if(!payload)throw new Error('ZIP! MARKET QR 코드가 아닙니다.');
       if(state.scannerTargetGameId&&payload.type!=='game')throw new Error('선택한 게임의 완료 QR 코드를 스캔해 주세요.');
-      if(state.scannerTargetGameId&&String(payload.gameId)!==state.scannerTargetGameId)throw new Error(`${state.scannerTargetGameName||'선택한 게임'}의 QR 코드가 아닙니다.`);
+      if(state.scannerTargetGameId&&!gameQrMatchesSelected(payload.gameId))throw new Error(`${state.scannerTargetGameName||'선택한 게임'}의 QR 코드가 아닙니다.`);
       await closeModal(false);
       if(payload.type==='payment'){showPaymentConfirm(Number(payload.amount),payload.description);return;}if(payload.type==='game'){const data=await api('/participant/complete-game',{method:'POST',body:{gameId:String(payload.gameId)}});renderParticipant(data);toast('게임 완료와 크레딧 지급이 처리되었습니다.');showParticipantPage('games',false);return;}throw new Error('지원하지 않는 QR 코드입니다.');
     }catch(error){toast(errorMessage(error),true);}
@@ -269,7 +296,7 @@
   $$('.payment-option').forEach(b=>b.addEventListener('click',()=>showPaymentConfirm(Number(b.dataset.amount))));
   $('#payment-confirm').addEventListener('click',async e=>{if(state.paymentInFlight)return;const amount=state.pendingAmount,description=state.pendingDescription||`${amount}C 결제`,requestId=state.paymentRequestId||newPaymentRequestId();state.paymentInFlight=true;setBusy(e.currentTarget,true,'결제 중…');try{await pay(amount,description,requestId);state.pendingAmount=0;state.pendingDescription='';state.paymentRequestId='';await closeModal();showParticipantPage('home');}catch(error){toast(errorMessage(error),true);}finally{state.paymentInFlight=false;setBusy(e.currentTarget,false);resetPaymentButton();}});
   $('#open-scanner').addEventListener('click',()=>openScannerFor());$('#camera-start').addEventListener('click',startScanner);
-  $('#participant-games').addEventListener('click',e=>{const card=e.target.closest('.game-card-button');if(!card)return;if(card.dataset.completed==='true'){toast('이미 완료한 게임입니다.');return;}openScannerFor(card.dataset.gameId,card.dataset.gameName);});
+  $('#participant-games').addEventListener('click',e=>{const card=e.target.closest('.game-card-button');if(!card)return;if(card.dataset.completed==='true'){toast('이미 완료한 게임입니다.');return;}openScannerFor(card.dataset.gameId,card.dataset.gameName,decodeGameIdentifiers(card.dataset.gameIdentifiers,card.dataset.gameId));});
   $$('[data-admin-tab]').forEach(b=>b.addEventListener('click',()=>switchAdminTab(b.dataset.adminTab)));
 
   $('#participant-create-form')?.addEventListener('submit',async event=>{
@@ -304,7 +331,7 @@
   $('#admin-participants').addEventListener('click',async e=>{const grant=e.target.closest('.grant-credit'),del=e.target.closest('.delete-participant');try{if(grant){setBusy(grant,true);await api(`/admin/participants/${grant.dataset.id}/credit`,{method:'POST',body:{amount:100}});await loadAdmin();toast('100 C를 지급했습니다.');}if(del&&confirm(`${del.dataset.name} 참가자와 관련 내역을 모두 삭제할까요?`)){setBusy(del,true,'삭제 중…');await api(`/admin/participants/${del.dataset.id}`,{method:'DELETE'});await loadAdmin();toast('참가자를 삭제했습니다.');}}catch(error){toast(errorMessage(error),true);if(grant)setBusy(grant,false);if(del)setBusy(del,false);}});
   $('#payment-qr-form').addEventListener('submit',e=>{e.preventDefault();const form=new FormData(e.currentTarget),amount=Number(form.get('amount')),description=String(form.get('description')||`${amount}C 결제`);showQr({app:'zip-market',v:1,type:'payment',amount,description},`${amount} C 결제 QR`,description);});
   $('#game-create-form').addEventListener('submit',async event=>{event.preventDefault();const formElement=event.currentTarget;if(!(formElement instanceof HTMLFormElement)){toast('게임 등록 폼을 찾을 수 없습니다. 새로고침해 주세요.',true);return;}const button=$('button[type=submit]',formElement),form=new FormData(formElement);setBusy(button,true);try{await api('/admin/games',{method:'POST',body:{name:form.get('name'),imageUrl:String(form.get('imageUrl')||DEFAULT_GAME_ASSET),reward:100}});resetFormSafely(formElement,'[name="name"]');const imageInput=formElement.querySelector('[name="imageUrl"]');if(imageInput)imageInput.value=DEFAULT_GAME_ASSET;await loadAdmin();toast('게임을 추가했습니다.');}catch(error){toast(errorMessage(error),true);}finally{setBusy(button,false);}});
-  $('#admin-games').addEventListener('click',async e=>{const qr=e.target.closest('.game-qr'),del=e.target.closest('.delete-game');try{if(qr)showQr({app:'zip-market',v:1,type:'game',gameId:qr.dataset.id},`${qr.dataset.name} 완료 QR`,'참가자가 스캔하면 게임 완료로 기록됩니다.');if(del&&confirm(`${del.dataset.name} 게임과 참가자 완료 기록을 삭제할까요?`)){setBusy(del,true,'삭제 중…');await api(`/admin/games/${del.dataset.id}`,{method:'DELETE'});await loadAdmin();toast('게임을 삭제했습니다.');}}catch(error){toast(errorMessage(error),true);if(del)setBusy(del,false);}});
+  $('#admin-games').addEventListener('click',async e=>{const qr=e.target.closest('.game-qr'),del=e.target.closest('.delete-game');try{if(qr){const gameId=qr.dataset.id;showQr({app:'zip-market',v:2,type:'game',gameId},`${qr.dataset.name} 완료 QR`,'참가자가 스캔하면 게임 완료로 기록됩니다.');}if(del&&confirm(`${del.dataset.name} 게임과 참가자 완료 기록을 삭제할까요?`)){setBusy(del,true,'삭제 중…');await api(`/admin/games/${del.dataset.id}`,{method:'DELETE'});await loadAdmin();toast('게임을 삭제했습니다.');}}catch(error){toast(errorMessage(error),true);if(del)setBusy(del,false);}});
   $('#admin-password-form').addEventListener('submit',async event=>{event.preventDefault();const formElement=event.currentTarget;if(!(formElement instanceof HTMLFormElement)){toast('관리자 비밀번호 폼을 찾을 수 없습니다. 새로고침해 주세요.',true);return;}const button=$('button[type=submit]',formElement),form=new FormData(formElement),newPassword=String(form.get('password')),confirmPassword=String(form.get('confirmPassword'));if(newPassword!==confirmPassword){toast('새 비밀번호가 서로 다릅니다.',true);return;}setBusy(button,true);try{await api('/admin/password',{method:'POST',body:{password:newPassword}});resetPasswordInputsSafely(formElement);toast('관리자 비밀번호를 변경했습니다. 다음 로그인부터 새 비밀번호를 사용해 주세요.');}catch(error){toast(errorMessage(error),true);}finally{setBusy(button,false);}});
 
   async function restoreSession(){initializeHistory();if(!state.token||!state.role){showView('login');return;}try{if(state.role==='participant')await loadParticipant();else if(state.role==='admin'){showView('admin');await loadAdmin();}else throw new Error('invalid role');}catch{clearSession();showView('login');}}
