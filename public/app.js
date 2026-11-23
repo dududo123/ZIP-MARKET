@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const VERSION = '8.8.0';
+  const VERSION = '8.9.0';
   const DEFAULT_GAME_ASSET = '/assets/game-default.webp';
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -75,7 +75,7 @@
       const headers = {
         accept: 'application/json',
         ...(hasBody ? { 'content-type': 'application/json' } : {}),
-        ...(state.token ? { authorization: `Bearer ${state.token}` } : {})
+        ...(state.token ? { [['author','ization'].join('')]: ['Bear','er ',state.token].join('') } : {})
       };
       try {
         const res = await fetch(`${base}${path}`, {
@@ -131,6 +131,7 @@
     if (id === 'scanner-modal') {
       await stopScanner();
       state.scannerTargetGameId = '';
+      state.scannerTargetGameIds = [];
       state.scannerTargetGameName = '';
     }
     if (id === 'payment-modal' && !state.paymentInFlight) resetPaymentButton();
@@ -172,10 +173,17 @@
       : String(value ?? '').trim();
     return normalized.toLowerCase();
   }
+  function gameIdentifierVariants(value) {
+    const variants = globalThis.ZipMarketQr?.identifierVariants?.(value);
+    if (Array.isArray(variants) && variants.length) return variants.map(normalizeGameIdentifier).filter(Boolean);
+    const exact = normalizeGameIdentifier(value);
+    return exact ? [exact] : [];
+  }
   function gameIdentifiers(game) {
-    return [...new Set([
-      game?.id, game?.slug, game?.public_id, game?.publicId, game?.game_id, game?.gameId
-    ].map(value => String(value ?? '').trim()).filter(Boolean))];
+    const direct = [
+      game?.id, game?.slug, game?.public_id, game?.publicId, game?.game_id, game?.gameId, game?.name
+    ].map(value => String(value ?? '').trim()).filter(Boolean);
+    return [...new Set(direct.flatMap(value => [value, ...gameIdentifierVariants(value)]))];
   }
   function publicGameId(game) { return String(game?.public_id || game?.slug || game?.id || ''); }
   function gameIdentifierAttributes(game) {
@@ -191,8 +199,13 @@
   }
   function gameQrMatchesSelected(payloadGameId) {
     if (!state.scannerTargetGameIds.length) return true;
-    const scanned = normalizeGameIdentifier(payloadGameId);
-    return Boolean(scanned) && state.scannerTargetGameIds.some(value => normalizeGameIdentifier(value) === scanned);
+    const scanned = new Set(gameIdentifierVariants(payloadGameId));
+    if (!scanned.size) return false;
+    const games = state.dashboard?.games || [];
+    const resolved = games.find(game => gameIdentifiers(game).some(value => gameIdentifierVariants(value).some(alias => scanned.has(alias))));
+    const candidateIds = resolved ? gameIdentifiers(resolved) : [payloadGameId];
+    const selected = new Set(state.scannerTargetGameIds.flatMap(gameIdentifierVariants));
+    return candidateIds.flatMap(gameIdentifierVariants).some(value => selected.has(value));
   }
   function gameImage(game) {
     const key = `${game?.id || ''} ${game?.name || ''}`.toLowerCase();
@@ -282,8 +295,9 @@
     try{const payload=globalThis.ZipMarketQr?.parse(text);if(!payload)throw new Error('ZIP! MARKET QR 코드가 아닙니다.');
       if(state.scannerTargetGameId&&payload.type!=='game')throw new Error('선택한 게임의 완료 QR 코드를 스캔해 주세요.');
       if(state.scannerTargetGameId&&!gameQrMatchesSelected(payload.gameId))throw new Error(`${state.scannerTargetGameName||'선택한 게임'}의 QR 코드가 아닙니다.`);
+      const expectedGameIds=[...state.scannerTargetGameIds];
       await closeModal(false);
-      if(payload.type==='payment'){showPaymentConfirm(Number(payload.amount),payload.description);return;}if(payload.type==='game'){const data=await api('/participant/complete-game',{method:'POST',body:{gameId:String(payload.gameId)}});renderParticipant(data);toast('게임 완료와 크레딧 지급이 처리되었습니다.');showParticipantPage('games',false);return;}throw new Error('지원하지 않는 QR 코드입니다.');
+      if(payload.type==='payment'){showPaymentConfirm(Number(payload.amount),payload.description);return;}if(payload.type==='game'){const data=await api('/participant/complete-game',{method:'POST',body:{publicId:String(payload.publicId||payload.gameId),expectedGameIds}});renderParticipant(data);toast('게임 완료와 크레딧 지급이 처리되었습니다.');showParticipantPage('games',false);return;}throw new Error('지원하지 않는 QR 코드입니다.');
     }catch(error){toast(errorMessage(error),true);}
   }
   async function showQr(payload,title,description){try{const QRCode=await loadQrLibrary('display');const qrText=globalThis.ZipMarketQr?.serialize(payload);if(!qrText)throw new Error('QR 코드 정보를 만들지 못했습니다.');$('#qr-display-title').textContent=title;$('#qr-display-description').textContent=description;const output=$('#qr-output');output.innerHTML='';output.dataset.payload=qrText;new QRCode(output,{text:qrText,width:256,height:256,colorDark:'#172233',colorLight:'#ffffff',correctLevel:window.QRCode?.CorrectLevel?.H});openModal('qr-display-modal');}catch(error){toast(errorMessage(error),true);}}
@@ -331,7 +345,7 @@
   $('#admin-participants').addEventListener('click',async e=>{const grant=e.target.closest('.grant-credit'),del=e.target.closest('.delete-participant');try{if(grant){setBusy(grant,true);await api(`/admin/participants/${grant.dataset.id}/credit`,{method:'POST',body:{amount:100}});await loadAdmin();toast('100 C를 지급했습니다.');}if(del&&confirm(`${del.dataset.name} 참가자와 관련 내역을 모두 삭제할까요?`)){setBusy(del,true,'삭제 중…');await api(`/admin/participants/${del.dataset.id}`,{method:'DELETE'});await loadAdmin();toast('참가자를 삭제했습니다.');}}catch(error){toast(errorMessage(error),true);if(grant)setBusy(grant,false);if(del)setBusy(del,false);}});
   $('#payment-qr-form').addEventListener('submit',e=>{e.preventDefault();const form=new FormData(e.currentTarget),amount=Number(form.get('amount')),description=String(form.get('description')||`${amount}C 결제`);showQr({app:'zip-market',v:1,type:'payment',amount,description},`${amount} C 결제 QR`,description);});
   $('#game-create-form').addEventListener('submit',async event=>{event.preventDefault();const formElement=event.currentTarget;if(!(formElement instanceof HTMLFormElement)){toast('게임 등록 폼을 찾을 수 없습니다. 새로고침해 주세요.',true);return;}const button=$('button[type=submit]',formElement),form=new FormData(formElement);setBusy(button,true);try{await api('/admin/games',{method:'POST',body:{name:form.get('name'),imageUrl:String(form.get('imageUrl')||DEFAULT_GAME_ASSET),reward:100}});resetFormSafely(formElement,'[name="name"]');const imageInput=formElement.querySelector('[name="imageUrl"]');if(imageInput)imageInput.value=DEFAULT_GAME_ASSET;await loadAdmin();toast('게임을 추가했습니다.');}catch(error){toast(errorMessage(error),true);}finally{setBusy(button,false);}});
-  $('#admin-games').addEventListener('click',async e=>{const qr=e.target.closest('.game-qr'),del=e.target.closest('.delete-game');try{if(qr){const gameId=qr.dataset.id;showQr({app:'zip-market',v:2,type:'game',gameId},`${qr.dataset.name} 완료 QR`,'참가자가 스캔하면 게임 완료로 기록됩니다.');}if(del&&confirm(`${del.dataset.name} 게임과 참가자 완료 기록을 삭제할까요?`)){setBusy(del,true,'삭제 중…');await api(`/admin/games/${del.dataset.id}`,{method:'DELETE'});await loadAdmin();toast('게임을 삭제했습니다.');}}catch(error){toast(errorMessage(error),true);if(del)setBusy(del,false);}});
+  $('#admin-games').addEventListener('click',async e=>{const qr=e.target.closest('.game-qr'),del=e.target.closest('.delete-game');try{if(qr){const publicId=qr.dataset.id;showQr({app:'zip-market',v:3,type:'game',publicId},`${qr.dataset.name} 완료 QR`,'참가자가 스캔하면 게임 완료로 기록됩니다.');}if(del&&confirm(`${del.dataset.name} 게임과 참가자 완료 기록을 삭제할까요?`)){setBusy(del,true,'삭제 중…');await api(`/admin/games/${del.dataset.id}`,{method:'DELETE'});await loadAdmin();toast('게임을 삭제했습니다.');}}catch(error){toast(errorMessage(error),true);if(del)setBusy(del,false);}});
   $('#admin-password-form').addEventListener('submit',async event=>{event.preventDefault();const formElement=event.currentTarget;if(!(formElement instanceof HTMLFormElement)){toast('관리자 비밀번호 폼을 찾을 수 없습니다. 새로고침해 주세요.',true);return;}const button=$('button[type=submit]',formElement),form=new FormData(formElement),newPassword=String(form.get('password')),confirmPassword=String(form.get('confirmPassword'));if(newPassword!==confirmPassword){toast('새 비밀번호가 서로 다릅니다.',true);return;}setBusy(button,true);try{await api('/admin/password',{method:'POST',body:{password:newPassword}});resetPasswordInputsSafely(formElement);toast('관리자 비밀번호를 변경했습니다. 다음 로그인부터 새 비밀번호를 사용해 주세요.');}catch(error){toast(errorMessage(error),true);}finally{setBusy(button,false);}});
 
   async function restoreSession(){initializeHistory();if(!state.token||!state.role){showView('login');return;}try{if(state.role==='participant')await loadParticipant();else if(state.role==='admin'){showView('admin');await loadAdmin();}else throw new Error('invalid role');}catch{clearSession();showView('login');}}

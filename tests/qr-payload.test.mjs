@@ -5,7 +5,7 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../public/qr-payload.js', import.meta.url), 'utf8');
 const context = { URL, globalThis: {} };
 vm.runInNewContext(source, context, { filename: 'qr-payload.js' });
-const { parse, serialize, normalizeGameId } = context.globalThis.ZipMarketQr;
+const { parse, serialize, normalizeGameId, identifierVariants } = context.globalThis.ZipMarketQr;
 
 const paymentText = serialize({ type: 'payment', amount: 275, description: '플리마켓 결제' });
 assert.match(paymentText, /^ZIPMARKET\|PAY\|275\|/);
@@ -16,6 +16,13 @@ assert.deepEqual(JSON.parse(JSON.stringify(parse(paymentText))), {
 const gameText = serialize({ type: 'game', gameId: 'balloon' });
 assert.equal(gameText, 'ZIPMARKET|GAME|balloon');
 assert.equal(parse(gameText).gameId, 'balloon', 'legacy text game IDs must remain valid');
+
+const canonicalPublicId = 'game-pingpong-3f12ab90';
+const canonicalText = serialize({ type: 'game', publicId: canonicalPublicId });
+assert.equal(canonicalText, `ZIPMARKET|GAME|${canonicalPublicId}`);
+assert.equal(parse(canonicalText).publicId, canonicalPublicId, 'canonical game- prefix must never be stripped');
+assert.equal(normalizeGameId(canonicalPublicId), canonicalPublicId, 'game- is identifier data, not a protocol wrapper');
+assert.ok(identifierVariants(canonicalPublicId).includes('pingpong-3f12ab90'), 'already printed v8.8 stripped alias must stay compatible');
 
 const uuid = '22222222-2222-2222-2222-222222222222';
 assert.equal(parse(JSON.stringify({ app: 'zip-market', v: 1, type: 'game', gameId: uuid })).gameId, uuid);

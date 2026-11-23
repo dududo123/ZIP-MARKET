@@ -17,6 +17,7 @@ const expected = {
   zip_market_grant_credit: [['p_participant_id','uuid'],['p_amount','integer'],['p_description','text']],
   zip_market_pay_credit: [['p_participant_id','uuid'],['p_amount','integer'],['p_description','text'],['p_request_id','text']],
   zip_market_admin_create_game: [['p_name','text'],['p_image_url','text'],['p_reward','integer']],
+  zip_market_resolve_game: [['p_game_identifier','text']],
   zip_market_complete_game: [['p_participant_id','uuid'],['p_game_id','text']]
 };
 
@@ -81,7 +82,8 @@ assert.match(repair, /Pass 1:[\s\S]*Pass 2:/i,'bulk RPC must validate all rows b
 assert.match(repair, /create function public\.zip_market_admin_create_participants[\s\S]*?return jsonb_build_object\('createdCount'/i,'bulk RPC return shape missing');
 assert.doesNotMatch(repair, /not\s+v_valid\s+and\s+p_password\s*=\s*p_initial_password/i,'bootstrap password must not overwrite a changed administrator password');
 assert.match(repair, /zip_market_pay_credit[\s\S]*p_request_id[\s\S]*'idempotent'/i,'payment RPC must be idempotent by request ID');
-assert.match(repair, /zip_market_complete_game[\s\S]*where id::text = btrim\(p_game_id\)[\s\S]*public_id::text/i,'game completion must accept ID, slug and public_id');
+assert.match(repair, /zip_market_resolve_game[\s\S]*lower\(id::text\)[\s\S]*lower\(slug\)[\s\S]*lower\(public_id::text\)/i,'game resolver must accept ID, slug and public_id');
+assert.match(repair, /zip_market_complete_game[\s\S]*zip_market_resolve_game\(p_game_id\)[\s\S]*game_completions/i,'game completion must resolve the canonical game row before inserting');
 assert.match(repair, /zip_market_admin_create_game[\s\S]*'builtin', false[\s\S]*jsonb_populate_record\(null::public\.games/i,'game creation must populate the real old/new row type including builtin');
 assert.equal(schema.split('\n').slice(1).join('\n'), repair.split('\n').slice(1).join('\n'), 'schema.sql and repair SQL logic diverged');
-console.log('rpc-contract.test: parsed ten API RPC contracts and both SQL files; signatures, parameters, returns, grants, revokes and cache refresh match exactly');
+console.log('rpc-contract.test: parsed eleven API RPC contracts and both SQL files; signatures, parameters, returns, grants, revokes and cache refresh match exactly');

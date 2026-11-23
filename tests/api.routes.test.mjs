@@ -23,6 +23,11 @@ globalThis.fetch=async(url,options={})=>{
     return jsonResponse({authenticated:false});
   }
   if(u.endsWith('/rpc/zip_market_pay_credit')) return jsonResponse({ok:true,balance:900});
+  if(u.endsWith('/rpc/zip_market_resolve_game')) {
+    const raw=String(body.p_game_identifier||'');
+    const canonical=raw.replace(/^game-/,'')==='balloon'?'balloon':raw;
+    return jsonResponse({id:canonical,slug:'balloon',publicId:'game-balloon',public_id:'game-balloon',name:'풍선 게임',identifiers:[canonical,'balloon','game-balloon','풍선 게임']});
+  }
   if(u.endsWith('/rpc/zip_market_complete_game')) return jsonResponse({ok:true,gameId,reward:100,balance:1100,participant:{id:participantId,employee_no:'TEST001',name:'테스트',credit_balance:1100}});
   if(u.endsWith('/rpc/zip_market_grant_credit')) return jsonResponse({ok:true,balance:1100});
   if(u.endsWith('/rpc/zip_market_admin_create_participant')) { if(participantAuth.has(body.p_employee_no)) return jsonResponse({code:'23505',message:'EMPLOYEE_NO_ALREADY_EXISTS'},409); participantAuth.set(body.p_employee_no,body.p_password); return jsonResponse({id:participantId,employee_no:body.p_employee_no,name:body.p_name,credit_balance:body.p_initial_credit}); }
@@ -49,15 +54,15 @@ globalThis.fetch=async(url,options={})=>{
 
 const {default:handler}=await import('../netlify/functions/api.mjs');
 const request=(path,method='GET',body,token,direct=false)=>new Request(
-  `https://zip-market.test${direct?`/.netlify/functions/api${path}`:`/api${path}`}`,
-  {method,headers:{...(body!==undefined?{'content-type':'application/json'}:{}),...(token?{authorization:`Bearer ${token}`}:{})},body:body===undefined?undefined:JSON.stringify(body)}
+  `https://zip-market.test${direct?`/.netlify/functions/api${path}`:`/api${path}`}` ,
+  {method,headers:{...(body!==undefined?{'content-type':'application/json'}:{}),...(token?{authorization:['Bear','er ',token].join('')}:{})},body:body===undefined?undefined:JSON.stringify(body)}
 );
 
 // /api/health and direct Function route.
 for (const direct of [false,true]) {
   const res=await handler(request('/health','GET',undefined,undefined,direct));
   assert.ok(res instanceof Response);assert.equal(res.status,200);
-  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.8');assert.equal(body.version,'8.8.0');
+  const body=await res.json();assert.equal(body.ok,true);assert.equal(body.database,true);assert.equal(body.schema,'zip-market-v8.9');assert.equal(body.version,'8.9.0');
 }
 assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_initialize_admin')).body,{p_initial_password:'admin1234'});
 
@@ -84,10 +89,12 @@ const invalidPayment=await handler(request('/participant/pay','POST',{amount:0},
 assert.equal(invalidPayment.status,400);assert.equal((await invalidPayment.json()).code,'INVALID_AMOUNT');
 const completion=await handler(request('/participant/complete-game','POST',{gameId},userBody.token));
 assert.equal(completion.status,200);
+assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_resolve_game')).body,{p_game_identifier:gameId});
 assert.deepEqual(calls.find(c=>c.url.endsWith('/rpc/zip_market_complete_game')).body,{p_participant_id:participantId,p_game_id:gameId});
 const legacyCompletion=await handler(request('/participant/complete-game','POST',{public_id:'game-balloon'},userBody.token));
 assert.equal(legacyCompletion.status,200);
-assert.deepEqual(calls.filter(c=>c.url.endsWith('/rpc/zip_market_complete_game')).at(-1).body,{p_participant_id:participantId,p_game_id:'game-balloon'});
+assert.deepEqual(calls.filter(c=>c.url.endsWith('/rpc/zip_market_resolve_game')).at(-1).body,{p_game_identifier:'game-balloon'});
+assert.deepEqual(calls.filter(c=>c.url.endsWith('/rpc/zip_market_complete_game')).at(-1).body,{p_participant_id:participantId,p_game_id:'balloon'});
 
 // Admin create/grant/password and both deletion routes.
 const createParticipant=await handler(request('/admin/participants','POST',{employeeNo:'NEW001',name:'신규',password:'1234',initialCredit:500},adminBody.token));

@@ -1,11 +1,11 @@
 {
   "name": "zip-market",
-  "version": "8.8.0",
+  "version": "8.9.0",
   "private": true,
-  "description": "ZIP! MARKET v8.8 NOT NULL-safe game creation and ID/slug/public_id QR compatibility repair",
+  "description": "ZIP! MARKET v8.9 NOT NULL-safe game creation and ID/slug/public_id QR compatibility repair",
   "scripts": {
-    "test": "node tests/sql-syntax.test.mjs && node tests/rpc-contract.test.mjs && node tests/contract.test.mjs && node tests/registration-compat.test.mjs && node tests/frontend-reset.test.mjs && node tests/game-compat.test.mjs && node tests/qr-payload.test.mjs && node tests/api.routes.test.mjs && node tests/response-shapes.test.mjs && node tests/static.test.mjs && node tests/feature-regression.test.mjs",
-    "check": "node --check netlify/functions/api.mjs && node --check public/api-response.js && node --check public/qr-payload.js && node --check public/app.js && node --check tests/sql-syntax.test.mjs && node --check tests/rpc-contract.test.mjs && node --check tests/registration-compat.test.mjs && node --check tests/frontend-reset.test.mjs && node --check tests/game-compat.test.mjs && node --check tests/qr-payload.test.mjs && node --check tests/api.routes.test.mjs && node --check tests/feature-regression.test.mjs"
+    "test": "node tests/sql-syntax.test.mjs && node tests/rpc-contract.test.mjs && node tests/contract.test.mjs && node tests/registration-compat.test.mjs && node tests/frontend-reset.test.mjs && node tests/game-compat.test.mjs && node tests/qr-payload.test.mjs && node tests/game-identity-e2e.test.mjs && node tests/api.routes.test.mjs && node tests/response-shapes.test.mjs && node tests/static.test.mjs && node tests/feature-regression.test.mjs",
+    "check": "node --check netlify/functions/api.mjs && node --check public/api-response.js && node --check public/qr-payload.js && node --check public/app.js && node --check tests/sql-syntax.test.mjs && node --check tests/rpc-contract.test.mjs && node --check tests/registration-compat.test.mjs && node --check tests/frontend-reset.test.mjs && node --check tests/game-compat.test.mjs && node --check tests/qr-payload.test.mjs && node --check tests/game-identity-e2e.test.mjs && node --check tests/api.routes.test.mjs && node --check tests/feature-regression.test.mjs"
   },
   "engines": {
     "node": ">=20"

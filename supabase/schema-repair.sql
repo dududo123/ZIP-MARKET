@@ -1,4 +1,4 @@
--- ZIP! MARKET v8.8.0 — SAFE SUPABASE GAME/PASSWORD COMPATIBILITY REPAIR
+-- ZIP! MARKET v8.9.0 — SAFE SUPABASE GAME/PASSWORD COMPATIBILITY REPAIR
 -- Run this entire file once in Supabase > SQL Editor > New query.
 -- It preserves rows. It never drops tables and never deletes participant, game,
 -- transaction, completion, or setting data. It only replaces ZIP! MARKET RPCs.
@@ -324,7 +324,7 @@ before insert or update on public.game_completions
 for each row execute function public.zip_market_sync_game_completion_compat();
 
 -- Synchronize all known transaction column generations. This trigger protects
--- old Functions and future direct inserts as well as the v8.8 RPCs.
+-- old Functions and future direct inserts as well as the v8.9 RPCs.
 create or replace function public.zip_market_sync_transaction_compat()
 returns trigger
 language plpgsql
@@ -405,6 +405,8 @@ drop function if exists public.zip_market_pay_credit(uuid, integer, text, text);
 drop function if exists public.zip_market_admin_create_game(text, text, integer);
 drop function if exists public.zip_market_complete_game(uuid, uuid);
 drop function if exists public.zip_market_complete_game(uuid, text);
+drop function if exists public.zip_market_resolve_game(text);
+drop function if exists public.zip_market_game_alias(text);
 
 -- ---------------------------------------------------------------------------
 -- 3. Canonical RPC contract. Names, parameter names, types, and JSON shapes
@@ -912,6 +914,107 @@ exception
 end;
 $$;
 
+
+create function public.zip_market_game_alias(p_value text)
+returns text
+language sql
+immutable
+set search_path = public, extensions, pg_catalog
+as $$
+  select trim(both '-' from regexp_replace(lower(btrim(coalesce(p_value, ''))), '[^a-z0-9가-힣]+', '-', 'g'))
+$$;
+
+create function public.zip_market_resolve_game(p_game_identifier text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, extensions, pg_catalog
+as $$
+declare
+  v_input text := btrim(coalesce(p_game_identifier, ''));
+  v_alias text;
+  v_game public.games%rowtype;
+  v_match_count integer;
+begin
+  if v_input = '' or length(v_input) > 200 then
+    raise exception 'GAME_NOT_FOUND' using errcode = 'P0002';
+  end if;
+
+  -- Remove only protocol wrappers with an explicit delimiter. Never strip the
+  -- canonical data prefix in values such as game-pingpong or game-<uuid>.
+  v_input := regexp_replace(v_input,
+    '^zip[![:space:]_.-]*market[[:space:]]*[|:/][[:space:]]*(game([_[:space:]-]*(complete|completion))?|completion|complete[_[:space:]-]*game)[[:space:]]*[|:/][[:space:]]*',
+    '', 'i');
+  v_input := regexp_replace(v_input,
+    '^zip[![:space:]_.-]*market[_[:space:]-]+(game([_[:space:]-]*(complete|completion))?|completion|complete[_[:space:]-]*game)[[:space:]]*[|:/][[:space:]]*',
+    '', 'i');
+  v_input := regexp_replace(v_input,
+    '^(game[_[:space:]-]*(complete|completion)|completion|complete[_[:space:]-]*game)[[:space:]]*[|:/][[:space:]]*',
+    '', 'i');
+  v_input := regexp_replace(v_input, '^game[[:space:]]*[|:/][[:space:]]*', '', 'i');
+  v_input := btrim(v_input);
+  v_alias := public.zip_market_game_alias(v_input);
+
+  -- Exact canonical match always wins.
+  select * into v_game
+    from public.games
+   where lower(id::text) = lower(v_input)
+      or lower(slug) = lower(v_input)
+      or lower(public_id::text) = lower(v_input)
+   order by case
+     when lower(public_id::text) = lower(v_input) then 0
+     when lower(id::text) = lower(v_input) then 1
+     else 2
+   end
+   limit 1;
+
+  if not found then
+    -- v8.8 incorrectly stripped the data prefix "game-" while serializing
+    -- some administrator QRs. Accept both sides so already printed QRs remain
+    -- valid, without changing the canonical public_id stored in the table.
+    select count(*) into v_match_count
+      from public.games
+     where lower(regexp_replace(slug, '^game[-_:]+', '', 'i')) = lower(regexp_replace(v_input, '^game[-_:]+', '', 'i'))
+        or lower(regexp_replace(public_id::text, '^game[-_:]+', '', 'i')) = lower(regexp_replace(v_input, '^game[-_:]+', '', 'i'))
+        or public.zip_market_game_alias(name) = v_alias
+        or public.zip_market_game_alias(slug) = v_alias
+        or public.zip_market_game_alias(public_id::text) = v_alias;
+
+    if v_match_count > 1 then
+      raise exception 'GAME_IDENTIFIER_AMBIGUOUS' using errcode = '21000';
+    end if;
+
+    select * into v_game
+      from public.games
+     where lower(regexp_replace(slug, '^game[-_:]+', '', 'i')) = lower(regexp_replace(v_input, '^game[-_:]+', '', 'i'))
+        or lower(regexp_replace(public_id::text, '^game[-_:]+', '', 'i')) = lower(regexp_replace(v_input, '^game[-_:]+', '', 'i'))
+        or public.zip_market_game_alias(name) = v_alias
+        or public.zip_market_game_alias(slug) = v_alias
+        or public.zip_market_game_alias(public_id::text) = v_alias
+     limit 1;
+  end if;
+
+  if not found then raise exception 'GAME_NOT_FOUND' using errcode = 'P0002'; end if;
+
+  return jsonb_build_object(
+    'id', v_game.id::text,
+    'slug', v_game.slug,
+    'publicId', coalesce(v_game.public_id::text, v_game.slug, v_game.id::text),
+    'public_id', coalesce(v_game.public_id::text, v_game.slug, v_game.id::text),
+    'name', v_game.name,
+    'identifiers', jsonb_build_array(
+      v_game.id::text,
+      v_game.slug,
+      v_game.public_id::text,
+      v_game.name,
+      public.zip_market_game_alias(v_game.name),
+      regexp_replace(v_game.slug, '^game[-_:]+', '', 'i'),
+      regexp_replace(v_game.public_id::text, '^game[-_:]+', '', 'i')
+    )
+  );
+end;
+$$;
+
 create function public.zip_market_complete_game(
   p_participant_id uuid,
   p_game_id text
@@ -927,15 +1030,13 @@ declare
   v_balance integer;
   v_person public.participants%rowtype;
 begin
-  -- Legacy installations use readable text IDs such as "balloon", while new
-  -- installations use UUIDs. Comparing as text and inserting v_game.id keeps
-  -- both schemas valid without converting or deleting existing game rows.
+  -- Resolve the scanned text identifier to one canonical row first, then use
+  -- the canonical primary key for completion insertion. A slug is never cast
+  -- or passed to a UUID-only lookup.
   select * into v_game
     from public.games
-   where id::text = btrim(p_game_id)
-      or lower(slug) = lower(btrim(p_game_id))
-      or lower(public_id::text) = lower(btrim(p_game_id))
-    limit 1;
+   where id::text = (public.zip_market_resolve_game(p_game_id)->>'id')
+   limit 1;
   if not found then raise exception 'GAME_NOT_FOUND' using errcode = 'P0002'; end if;
   v_reward := greatest(coalesce(v_game.reward, 0), 0);
 
@@ -1025,6 +1126,8 @@ revoke all on function public.zip_market_set_admin_password(text) from public, a
 revoke all on function public.zip_market_grant_credit(uuid, integer, text) from public, anon, authenticated;
 revoke all on function public.zip_market_pay_credit(uuid, integer, text, text) from public, anon, authenticated;
 revoke all on function public.zip_market_admin_create_game(text, text, integer) from public, anon, authenticated;
+revoke all on function public.zip_market_game_alias(text) from public, anon, authenticated;
+revoke all on function public.zip_market_resolve_game(text) from public, anon, authenticated;
 revoke all on function public.zip_market_complete_game(uuid, text) from public, anon, authenticated;
 revoke all on function public.zip_auth_admin(text, text) from public, anon, authenticated;
 revoke all on function public.zip_auth_participant(text, text) from public, anon, authenticated;
@@ -1038,12 +1141,14 @@ grant execute on function public.zip_market_set_admin_password(text) to service_
 grant execute on function public.zip_market_grant_credit(uuid, integer, text) to service_role;
 grant execute on function public.zip_market_pay_credit(uuid, integer, text, text) to service_role;
 grant execute on function public.zip_market_admin_create_game(text, text, integer) to service_role;
+grant execute on function public.zip_market_game_alias(text) to service_role;
+grant execute on function public.zip_market_resolve_game(text) to service_role;
 grant execute on function public.zip_market_complete_game(uuid, text) to service_role;
 grant execute on function public.zip_auth_admin(text, text) to service_role;
 grant execute on function public.zip_auth_participant(text, text) to service_role;
 
 insert into public.app_settings(key, value, updated_at)
-values ('schema_version', '8.8.0', now())
+values ('schema_version', '8.9.0', now())
 on conflict (key) do update set value = excluded.value, updated_at = excluded.updated_at;
 
 -- ---------------------------------------------------------------------------
@@ -1066,6 +1171,7 @@ begin
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
     ('public.zip_market_admin_create_game(text,text,integer)'),
+    ('public.zip_market_resolve_game(text)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where to_regprocedure(signature) is null;
@@ -1082,6 +1188,7 @@ begin
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
     ('public.zip_market_admin_create_game(text,text,integer)'),
+    ('public.zip_market_resolve_game(text)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where pg_get_function_result(to_regprocedure(signature)) <> 'jsonb';
@@ -1098,6 +1205,7 @@ begin
     ('public.zip_market_grant_credit(uuid,integer,text)'),
     ('public.zip_market_pay_credit(uuid,integer,text,text)'),
     ('public.zip_market_admin_create_game(text,text,integer)'),
+    ('public.zip_market_resolve_game(text)'),
     ('public.zip_market_complete_game(uuid,text)')
   ) expected(signature)
   where not has_function_privilege('service_role', to_regprocedure(signature), 'EXECUTE')
@@ -1181,6 +1289,7 @@ where n.nspname = 'public'
     'zip_market_grant_credit',
     'zip_market_pay_credit',
     'zip_market_admin_create_game',
+    'zip_market_resolve_game',
     'zip_market_complete_game'
   )
 order by p.proname;

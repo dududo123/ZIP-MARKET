@@ -24,6 +24,7 @@ const rpcContracts = {
   zip_market_grant_credit: ['p_participant_id','p_amount','p_description'],
   zip_market_pay_credit: ['p_participant_id','p_amount','p_description','p_request_id'],
   zip_market_admin_create_game: ['p_name','p_image_url','p_reward'],
+  zip_market_resolve_game: ['p_game_identifier'],
   zip_market_complete_game: ['p_participant_id','p_game_id']
 };
 for (const [fn,args] of Object.entries(rpcContracts)) {

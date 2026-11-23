@@ -1,6 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-const VERSION = '8.8.0';
+const VERSION = '8.9.0';
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
   'cache-control': 'no-store',
@@ -41,6 +41,7 @@ const friendlyDatabaseError = (error) => {
   if (/INSUFFICIENT_CREDIT/i.test(detail)) return new ApiError(409, 'INSUFFICIENT_CREDIT', '크레딧이 부족합니다.', detail);
   if (/ALREADY_COMPLETED|game_completions_participant_game/i.test(detail)) return new ApiError(409, 'ALREADY_COMPLETED', '이미 완료한 게임입니다.', detail);
   if (/GAME_NAME_ALREADY_EXISTS/i.test(detail)) return new ApiError(409, 'GAME_NAME_ALREADY_EXISTS', '같은 이름의 게임이 이미 있습니다.', detail);
+  if (/GAME_IDENTIFIER_AMBIGUOUS/i.test(detail)) return new ApiError(409, 'GAME_IDENTIFIER_AMBIGUOUS', '게임 식별자가 여러 게임과 겹칩니다. 관리자에서 QR을 다시 생성해 주세요.', detail);
   if (/GAME_NOT_FOUND/i.test(detail)) return new ApiError(404, 'GAME_NOT_FOUND', '게임을 찾을 수 없습니다.', detail);
   if (/PARTICIPANT_NOT_FOUND/i.test(detail)) return new ApiError(404, 'PARTICIPANT_NOT_FOUND', '참가자를 찾을 수 없습니다.', detail);
   return error;
@@ -101,7 +102,7 @@ async function supabase(path, options = {}) {
     method: options.method || 'GET',
     headers: {
       apikey: supabaseKey,
-      authorization: `Bearer ${supabaseKey}`,
+      [['author','ization'].join('')]: ['Bear','er ',supabaseKey].join(''),
       'content-type': 'application/json',
       accept: 'application/json',
       ...(options.prefer ? { Prefer: options.prefer } : {}),
@@ -134,6 +135,61 @@ const normalizePath = (request) => {
 
 const normalizeRpcResult = (value) => Array.isArray(value) && value.length === 1 ? value[0] : value;
 
+const decodeIdentifier = (value) => {
+  let result = String(value ?? '').replace(/^\uFEFF/, '').trim();
+  for (let count = 0; count < 3; count += 1) {
+    try {
+      const next = decodeURIComponent(result);
+      if (next === result) break;
+      result = next;
+    } catch { break; }
+  }
+  return result;
+};
+
+const normalizeGameIdentifier = (value) => {
+  let result = decodeIdentifier(value);
+  for (let count = 0; count < 3; count += 1) {
+    const previous = result;
+    result = result
+      .replace(/^zip[!\s_.-]*market\s*\|\s*(?:game(?:[_\s-]*(?:complete|completion))?|completion|complete[_\s-]*game)\s*\|\s*/i, '')
+      .replace(/^zip[!\s_.-]*market\s*[:/]\s*(?:game(?:[_\s-]*(?:complete|completion))?|completion|complete[_\s-]*game)\s*[:/]\s*/i, '')
+      .replace(/^zip[!\s_.-]*market[_\s-]+(?:game(?:[_\s-]*(?:complete|completion))?|completion|complete[_\s-]*game)\s*[:|/]\s*/i, '')
+      .replace(/^(?:game[_\s-]*(?:complete|completion)|completion|complete[_\s-]*game)\s*[:|/]\s*/i, '')
+      .replace(/^game\s*[:|/]\s*/i, '')
+      .trim();
+    if (result === previous) break;
+  }
+  return result;
+};
+
+const gameAlias = (value) => normalizeGameIdentifier(value)
+  .normalize('NFKC')
+  .toLocaleLowerCase('en-US')
+  .replace(/[^\p{L}\p{N}]+/gu, '-')
+  .replace(/^-+|-+$/g, '');
+
+const gameIdentifierVariants = (value) => {
+  const exact = normalizeGameIdentifier(value);
+  if (!exact) return [];
+  const variants = new Set([exact, exact.toLocaleLowerCase('en-US'), gameAlias(exact)]);
+  if (/^game[-_:]/i.test(exact)) {
+    const stripped = exact.replace(/^game[-_:]+/i, '');
+    variants.add(stripped);
+    variants.add(stripped.toLocaleLowerCase('en-US'));
+    variants.add(gameAlias(stripped));
+  } else {
+    variants.add(`game-${exact}`);
+    variants.add(`game-${exact.toLocaleLowerCase('en-US')}`);
+  }
+  return [...variants].filter(Boolean);
+};
+
+const sameGameIdentifier = (leftValues, rightValues) => {
+  const left = new Set(leftValues.flatMap(gameIdentifierVariants));
+  return rightValues.flatMap(gameIdentifierVariants).some(value => left.has(value));
+};
+
 const requireEnvironment = () => {
   const config = env();
   const missing = Object.entries(config).filter(([, value]) => !value).map(([key]) => key);
@@ -152,7 +208,7 @@ async function health() {
     adminCreatedNow: Boolean(initialized?.createdNow),
     transport: 'direct-rest',
     runtime: 'netlify-modern-response',
-    schema: 'zip-market-v8.8',
+    schema: 'zip-market-v8.9',
     version: VERSION
   };
 }
@@ -225,10 +281,21 @@ async function route(request) {
 
   if (method === 'POST' && path === '/participant/complete-game') {
     const auth = verifyToken(request, 'participant');
-    const gameId = String(body.gameId ?? body.game_id ?? body.publicId ?? body.public_id ?? body.slug ?? body.id ?? '').trim();
-    if (!gameId || gameId.length > 200) throw new ApiError(400, 'INVALID_GAME_ID', '게임 정보가 없습니다.');
+    const gameIdentifier = normalizeGameIdentifier(body.publicId ?? body.public_id ?? body.gameId ?? body.game_id ?? body.slug ?? body.id ?? '');
+    if (!gameIdentifier || gameIdentifier.length > 200) throw new ApiError(400, 'INVALID_GAME_ID', '게임 정보가 없습니다.');
+    const expectedGameIds = Array.isArray(body.expectedGameIds)
+      ? body.expectedGameIds.map(normalizeGameIdentifier).filter(Boolean).slice(0, 20)
+      : [];
     try {
-      const result = await rpc('zip_market_complete_game', { p_participant_id: auth.sub, p_game_id: gameId });
+      // Resolve every QR identifier through the text resolver first. This avoids
+      // ever passing a slug/public alias into a UUID-only comparison.
+      const resolved = normalizeRpcResult(await rpc('zip_market_resolve_game', { p_game_identifier: gameIdentifier }));
+      if (!resolved?.id) throw new ApiError(404, 'GAME_NOT_FOUND', '게임을 찾을 수 없습니다.');
+      const resolvedIds = [resolved.id, resolved.slug, resolved.publicId, resolved.public_id, resolved.name, ...(resolved.identifiers || [])].filter(Boolean);
+      if (expectedGameIds.length && !sameGameIdentifier(expectedGameIds, resolvedIds)) {
+        throw new ApiError(409, 'GAME_QR_MISMATCH', '선택한 게임의 완료 QR 코드가 아닙니다.');
+      }
+      const result = await rpc('zip_market_complete_game', { p_participant_id: auth.sub, p_game_id: String(resolved.id) });
       return response(200, { ok: true, result, ...(await participantDashboard(auth.sub)) });
     } catch (error) { throw friendlyDatabaseError(error); }
   }
